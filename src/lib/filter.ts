@@ -20,7 +20,7 @@ Return ONLY a valid JSON array. No other text, no markdown.`;
 
 const BATCH_SIZE = 15;
 const GEMINI_ENDPOINT =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+  'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent';
 
 interface RawSignal {
   market_id: string;
