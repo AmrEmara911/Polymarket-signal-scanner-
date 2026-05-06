@@ -157,29 +157,7 @@ function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSign
     };
   }
 
-  // Rule 4: probability > 92% on product release or earnings → already fully priced in
-  const prob = clamp(market.probability, 0);
-  if (prob > 0.92 && isProductOrEarningsMarket(market.question)) {
-    return {
-      ...signal,
-      is_relevant: false,
-      relevance_score: Math.min(clamp(signal.relevance_score, 0.2), 0.25),
-      urgency: 'low',
-      reason: `Probability ${(prob * 100).toFixed(0)}% — market is fully priced in and offers no actionable edge for a portfolio manager.`,
-      signal_direction: null,
-    };
-  }
-
-  // Rule 5: low confidence signals are not actionable
-  if (clamp(signal.confidence, 0) < 0.4) {
-    return {
-      ...signal,
-      is_relevant: false,
-      reason: `Confidence too low (${signal.confidence?.toFixed?.(2) ?? '?'}) to be actionable. ${signal.reason}`,
-    };
-  }
-
-  // Rule 6: no stocks and no signal type means the transmission path is undefined
+  // Rule 4: no stocks and no signal type means the transmission path is undefined
   const hasStocks = Array.isArray(signal.affected_stocks) && signal.affected_stocks.length > 0;
   if (!hasStocks && signal.signal_type === null) {
     return {
@@ -189,7 +167,7 @@ function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSign
     };
   }
 
-  // Rule 7: thin markets (volume < $10,000) — low confidence regardless of LLM assessment.
+  // Rule 5: thin markets (volume < $10,000) — low confidence regardless of LLM assessment.
   // Thin markets can be moved by a single participant and produce unreliable probability signals.
   const volume = market.volume ?? 0;
   if (volume < 10_000) {
@@ -434,32 +412,33 @@ async function analyzeBatch(markets: MarketForAnalysis[]) {
 
 ${BITCAP_RESEARCH_CONTEXT}
 
-Your job is judgment, not keyword matching. A market can be relevant even when it does not name a company if the event has a clear transmission path to public equities. Penalize vague markets, low-volume markets, sports/entertainment noise, and markets whose effect is already too indirect.
+Your job is judgment, not keyword matching. A market can be relevant even when it does not name a company if the event has a clear transmission path to public equities. The goal is 15–30 relevant signals out of every ~100 markets. If you are returning fewer than 10 relevant signals from a batch of 12, you are being too aggressive.
 
-EXPLICITLY REJECT these market types (set is_relevant: false, relevance_score < 0.3):
-- Same-day or short-term price targets: "Will AAPL close above $X on [specific date]?", "Will AMZN close above $X on May 6?" — these are trivial price bets, not strategic signals.
-- Celebrity or entertainment markets disguised as company markets: "Will Elon Musk tweet X times?"
-- Markets expiring within 7 days that are pure price predictions with no fundamental catalyst.
-- Sports markets even if they mention company names or sponsors.
-- Non-tech political markets with no clear tech equity transmission path (elections, immigration, crime).
-- Oil, real estate, agriculture, and commodity markets unless directly tied to tech supply chains.
-- Annual product cycle near-certainties: "Will Apple release an iPhone in 2025?" or "Will [company] release [annual product] in [year]?" — these are foregone conclusions, not signals.
-- Any product release or earnings market where probability is already above 92% — it is fully priced in and offers no actionable edge.
+ALWAYS RELEVANT — mark is_relevant: true with no exceptions for these:
+- Any market that directly mentions a BIT Capital holding by ticker or name: IREN, MSFT, GOOGL, META, NVDA, SOFI, RDDT, HIMS, LMND, HNGE, CRCL, APLD, COHR, GLXY, NTSK — these are direct portfolio signals regardless of probability level.
+- Fed rate decisions, FOMC outcomes, or any central bank policy shift that reprices growth equities.
+- AI regulation in the US or EU — any bill, executive order, or consent decree affecting LLMs, foundation models, or AI deployment.
+- Crypto regulation — ETF approvals/rejections, exchange licensing, stablecoin legislation, SEC/CFTC actions.
+- Semiconductor export controls or tariffs, especially US–China or Taiwan-related restrictions on chips, equipment, or advanced packaging.
+- Bitcoin or Ethereum price markets on weekly or monthly timeframes (not intraday/hourly).
+- Major tech company earnings results — beating or missing estimates by a meaningful margin.
+- IPOs of significant tech companies (>$1B expected market cap) that could affect sector dynamics or compete with holdings.
+- Taiwan Strait / China geopolitical events with a plausible impact on semiconductor supply chains.
 
-EXPLICITLY INCLUDE these high-value market types (set is_relevant: true when probability is non-trivial):
-- Fed rate decisions and monetary policy shifts that reprice growth equities.
-- Semiconductor tariffs, export controls, and trade restrictions (especially US-China, Taiwan).
-- AI regulation, antitrust actions, or consent decrees against big tech.
-- Company earnings beating or missing by significant margins.
-- Major M&A events, acquisitions, or divestitures for tech companies.
-- Geopolitical events affecting semiconductor supply chains.
-- IPOs of major tech companies that affect market dynamics or sector sentiment.
-- Crypto regulation, ETF approvals or rejections, and exchange licensing decisions.
-- Central bank digital currency decisions affecting fintech and payment networks.
+REJECT — mark is_relevant: false for these only:
+- 5-minute, hourly, or daily Bitcoin/crypto price windows — too short-term to be strategic signals.
+- Sports markets, even if a tech company is a sponsor.
+- Celebrity or entertainment markets with no equity transmission path: award shows, reality TV, celebrity tweets.
+- Markets expiring today that are pure same-day price bets with no fundamental catalyst ("Will X close above $Y today?").
+- Annual product cycle certainties: "Will Apple release an iPhone in 2025?" — foregone conclusions with no timing uncertainty.
+- Non-tech political markets with no plausible tech equity transmission path: crime rates, local elections, immigration.
+- Oil, agriculture, and real estate markets unless directly tied to data center energy costs or semiconductor materials.
 
-Important quality rule: direct markets about a listed stock crossing a price level, closing above/below a price, or hitting a high/low are usually NOT useful signals. They restate equity market pricing rather than explaining an outside catalyst. Mark them not relevant unless the market question itself contains a fundamental catalyst.
+Do NOT reject a market solely because its probability is high or low. A 95% probability on a Fed rate hold is still a signal — it tells us the market is pricing in stability, which affects growth equity valuations. Probability level alone is never a rejection reason.
 
-The deterministic_candidate_score is only a triage hint from the application. You may disagree with it, but if you do, explain why in the reason/thesis.
+Important: direct markets about a stock crossing a price level on a specific date are usually not useful signals — they restate equity pricing rather than explaining a catalyst. Mark them not relevant unless the question contains a fundamental driver.
+
+The deterministic_candidate_score is a triage hint. You may disagree with it, but explain why in the reason/thesis.
 
 Return JSON only with this shape:
 {
