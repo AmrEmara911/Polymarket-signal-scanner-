@@ -1,4 +1,3 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { supabase } from './supabase';
 
 const SYSTEM_PROMPT = `You are a senior investment analyst at BIT Capital, a Berlin-based \
@@ -20,6 +19,8 @@ celebrities, non-tech politics, oil/real estate/agriculture.
 Return ONLY a valid JSON array. No other text, no markdown.`;
 
 const BATCH_SIZE = 15;
+const GEMINI_ENDPOINT =
+  'https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent';
 
 interface RawSignal {
   market_id: string;
@@ -35,6 +36,25 @@ interface RawSignal {
 export interface AnalyzeResult {
   analyzed: number;
   relevant: number;
+}
+
+async function callGemini(apiKey: string, userPrompt: string): Promise<string> {
+  const res = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      contents: [{ parts: [{ text: userPrompt }] }],
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Gemini API error ${res.status}: ${body.slice(0, 300)}`);
+  }
+
+  const json = await res.json();
+  return json.candidates[0].content.parts[0].text as string;
 }
 
 export async function analyzeMarkets(): Promise<AnalyzeResult> {
@@ -66,12 +86,6 @@ export async function analyzeMarkets(): Promise<AnalyzeResult> {
   if (marketFetchError) throw new Error(`Supabase error: ${marketFetchError.message}`);
   if (!markets || markets.length === 0) return { analyzed: 0, relevant: 0 };
 
-  const genAI = new GoogleGenerativeAI(apiKey, { apiVersion: 'v1' });
-  const model = genAI.getGenerativeModel({
-    model: 'gemini-1.5-flash-latest',
-    systemInstruction: SYSTEM_PROMPT,
-  });
-
   let totalAnalyzed = 0;
   let totalRelevant = 0;
 
@@ -102,8 +116,7 @@ Each object must have exactly:
   urgency: "high" | "medium" | "low"
 }`;
 
-    const result = await model.generateContent(userPrompt);
-    const raw = result.response.text();
+    const raw = await callGemini(apiKey, userPrompt);
 
     // Strip markdown code fences if Gemini wraps the response
     const cleaned = raw
