@@ -66,9 +66,9 @@ export async function analyzeMarkets(): Promise<AnalyzeResult> {
   if (marketFetchError) throw new Error(`Supabase error: ${marketFetchError.message}`);
   if (!markets || markets.length === 0) return { analyzed: 0, relevant: 0 };
 
-  const genAI = new GoogleGenerativeAI(apiKey);
+  const genAI = new GoogleGenerativeAI(apiKey, { apiVersion: 'v1' });
   const model = genAI.getGenerativeModel({
-    model: 'gemini-2.0-flash',
+    model: 'gemini-1.5-flash-latest',
     systemInstruction: SYSTEM_PROMPT,
   });
 
