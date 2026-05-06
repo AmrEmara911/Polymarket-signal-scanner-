@@ -3,6 +3,29 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 
+type PipelineStatus = 'idle' | 'ingesting' | 'analyzing' | 'reporting' | 'done' | 'error';
+
+async function runPipeline(onStep: (status: PipelineStatus, msg: string) => void) {
+  onStep('ingesting', 'Step 1/3 — Ingesting markets...');
+  const ingestRes = await fetch('/api/ingest', { method: 'POST' });
+  const ingestData = await ingestRes.json();
+  if (!ingestData.success) throw new Error(ingestData.error ?? 'Ingest failed');
+
+  onStep('analyzing', `Step 2/3 — Analyzing ${ingestData.count} markets with LLM...`);
+  const analyzeRes = await fetch('/api/analyze', { method: 'POST' });
+  const analyzeData = await analyzeRes.json();
+  if (!analyzeData.success) throw new Error(analyzeData.error ?? 'Analyze failed');
+
+  if (analyzeData.relevant > 0) {
+    onStep('reporting', `Step 3/3 — Generating report for ${analyzeData.relevant} relevant signals...`);
+    const reportRes = await fetch('/api/report', { method: 'POST' });
+    const reportData = await reportRes.json();
+    if (!reportData.success && !reportData.id) throw new Error(reportData.error ?? 'Report failed');
+  }
+
+  onStep('done', `Done — ${ingestData.count} markets ingested, ${analyzeData.analyzed} analyzed, ${analyzeData.relevant} relevant signals found.`);
+}
+
 export default function Dashboard() {
   const [metrics, setMetrics] = useState({
     totalScanned: 0,
@@ -12,6 +35,8 @@ export default function Dashboard() {
   });
   const [topSignals, setTopSignals] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(true);
+  const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>('idle');
+  const [pipelineMessage, setPipelineMessage] = useState('');
 
   useEffect(() => {
     async function fetchData() {
@@ -48,9 +73,50 @@ export default function Dashboard() {
     return <div className="animate-pulse text-[#9ca3af]">Loading dashboard...</div>;
   }
 
+  async function handleRunPipeline() {
+    setPipelineStatus('ingesting');
+    setPipelineMessage('Starting pipeline...');
+    try {
+      await runPipeline((status, msg) => {
+        setPipelineStatus(status);
+        setPipelineMessage(msg);
+      });
+    } catch (err) {
+      setPipelineStatus('error');
+      setPipelineMessage(err instanceof Error ? err.message : 'Unknown error');
+    }
+  }
+
   return (
     <div className="space-y-8">
-      <h2 className="text-2xl font-bold text-white tracking-tight">Morning Briefing</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-2xl font-bold text-white tracking-tight">Morning Briefing</h2>
+        <div className="flex flex-col items-end gap-2">
+          <button
+            onClick={handleRunPipeline}
+            disabled={['ingesting', 'analyzing', 'reporting'].includes(pipelineStatus)}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#3b82f6] hover:bg-[#2563eb] disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors"
+          >
+            {['ingesting', 'analyzing', 'reporting'].includes(pipelineStatus) ? (
+              <>
+                <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                Running…
+              </>
+            ) : (
+              <>▶ Run Pipeline Now</>
+            )}
+          </button>
+          {pipelineMessage && (
+            <p className={`text-xs max-w-xs text-right ${
+              pipelineStatus === 'error' ? 'text-[#ef4444]' :
+              pipelineStatus === 'done'  ? 'text-[#10b981]' :
+              'text-[#9ca3af]'
+            }`}>
+              {pipelineMessage}
+            </p>
+          )}
+        </div>
+      </div>
 
       {/* Metrics Row */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
