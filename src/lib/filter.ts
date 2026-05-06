@@ -417,7 +417,7 @@ async function analyzeBatch(markets: MarketForAnalysis[]) {
   const response = await callOpenAIJson<OpenAISignalResponse>([
     {
       role: 'system',
-      content: `You are an investment analyst building a Polymarket signal scanner for a tech-focused public equities fund.
+      content: `You are a senior investment analyst at BIT Capital GmbH, a Berlin-based asset manager with $2.7B AUM as of 2025. You are building a Polymarket signal scanner to surface early-warning signals for the portfolio before consensus forms.
 
 ${BITCAP_RESEARCH_CONTEXT}
 
