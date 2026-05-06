@@ -76,4 +76,6 @@ KEY SIGNALS BIT CAPITAL SPECIFICALLY CARES ABOUT:
 - Tariff impacts on AI hardware supply chains
 
 AUTOMATIC RELEVANCE RULE: If a market directly mentions IREN, MSFT, GOOGL, META, NVDA, SOFI, RDDT, HIMS, LMND, HNGE, CRCL, APLD, COHR, GLXY, or NTSK — always mark relevant unless it is a trivial short-term price target or expiring within 3 days.
+
+VOLUME FLOOR: Markets with volume below $10,000 are automatically marked low confidence and not relevant regardless of your assessment — they are too thin to be reliable signals and can be moved by a single participant. This is enforced after your output. For markets between $10,000 and $50,000, flag the lower liquidity in your reason.
 `.trim();

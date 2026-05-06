@@ -189,6 +189,19 @@ function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSign
     };
   }
 
+  // Rule 7: thin markets (volume < $10,000) — low confidence regardless of LLM assessment.
+  // Thin markets can be moved by a single participant and produce unreliable probability signals.
+  const volume = market.volume ?? 0;
+  if (volume < 10_000) {
+    return {
+      ...signal,
+      is_relevant: false,
+      confidence: Math.min(clamp(signal.confidence, 0.5), 0.30),
+      urgency: 'low',
+      reason: `Low confidence: volume $${volume.toLocaleString()} is below the $10,000 minimum threshold. Thin markets can be manipulated by a single participant and produce unreliable probability signals.`,
+    };
+  }
+
   return signal;
 }
 

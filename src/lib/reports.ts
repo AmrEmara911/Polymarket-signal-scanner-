@@ -75,7 +75,7 @@ function reportUtilityScore(signal: SignalWithMarket) {
   if (['rates', 'tariff', 'regulatory', 'macro', 'crypto'].includes(type ?? '')) score += 0.18;
   if (type === 'company' && (signal.markets?.volume ?? 0) >= 10_000) score += 0.08;
   if ((signal.markets?.volume ?? 0) >= 50_000) score += 0.08;
-  if ((signal.markets?.volume ?? 0) < 5_000) score -= 0.12;
+  if ((signal.markets?.volume ?? 0) < 10_000) score -= 0.20;
   if (signal.affected_stocks?.length) score += 0.06;
   if (signal.thesis?.length > 120) score += 0.04;
 
