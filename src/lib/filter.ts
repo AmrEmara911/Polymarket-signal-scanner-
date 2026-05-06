@@ -18,6 +18,7 @@ interface MarketForAnalysis {
   candidate_score?: number;
   candidate_reasons?: string[];
   candidate_noise?: string[];
+  probability_change?: number | null; // vs 24h ago (fractional, e.g. 0.15 = +15pp)
 }
 
 interface RawSignal {
@@ -35,6 +36,7 @@ interface RawSignal {
   evidence: string[];
   key_risks: string[];
   suggested_action: string;
+  probability_change?: number | null; // set post-LLM from snapshot data
 }
 
 interface OpenAISignalResponse {
@@ -198,6 +200,13 @@ function normalizeSignal(
   if (!market) return null;
 
   const gatedSignal = applyQualityGate(signal, market);
+  const probChange = market.probability_change ?? null;
+
+  // Movement detection: > 20pp change → force urgency to high
+  const movementUrgencyOverride =
+    gatedSignal.is_relevant &&
+    probChange !== null &&
+    Math.abs(probChange) > 0.20;
 
   return {
     market_id: gatedSignal.market_id,
@@ -213,7 +222,7 @@ function normalizeSignal(
       : [],
     signal_type: gatedSignal.signal_type ?? null,
     signal_direction: gatedSignal.signal_direction ?? null,
-    urgency: gatedSignal.urgency ?? 'low',
+    urgency: movementUrgencyOverride ? 'high' : (gatedSignal.urgency ?? 'low'),
     thesis: String(gatedSignal.thesis ?? '').slice(0, 1200),
     evidence: Array.isArray(gatedSignal.evidence)
       ? gatedSignal.evidence.map((item) => String(item).trim()).filter(Boolean).slice(0, 5)
@@ -222,6 +231,7 @@ function normalizeSignal(
       ? gatedSignal.key_risks.map((item) => String(item).trim()).filter(Boolean).slice(0, 5)
       : [],
     suggested_action: String(gatedSignal.suggested_action ?? '').slice(0, 700),
+    probability_change: probChange,
   };
 }
 
@@ -303,6 +313,43 @@ async function upsertSignalsWithSchemaFallback(rows: SignalRow[]) {
   );
 }
 
+async function enrichWithProbabilityChanges(
+  markets: MarketForAnalysis[]
+): Promise<MarketForAnalysis[]> {
+  if (!markets.length) return markets;
+  const supabase = getSupabaseClient();
+  const now = new Date();
+  const t23h = new Date(now.getTime() - 23 * 60 * 60 * 1000);
+  const t25h = new Date(now.getTime() - 25 * 60 * 60 * 1000);
+  const ids = markets.map((m) => m.id);
+
+  const { data } = await supabase
+    .from('probability_snapshots')
+    .select('market_id, probability')
+    .in('market_id', ids)
+    .lte('recorded_at', t23h.toISOString())
+    .gte('recorded_at', t25h.toISOString())
+    .order('recorded_at', { ascending: false });
+
+  // Most-recent snapshot within the 23-25h window per market
+  const probAgo = new Map<string, number>();
+  const seen = new Set<string>();
+  for (const snap of (data ?? []) as { market_id: string; probability: number }[]) {
+    if (!seen.has(snap.market_id)) {
+      seen.add(snap.market_id);
+      probAgo.set(snap.market_id, snap.probability);
+    }
+  }
+
+  return markets.map((market) => ({
+    ...market,
+    probability_change:
+      probAgo.has(market.id) && market.probability != null
+        ? market.probability - probAgo.get(market.id)!
+        : null,
+  }));
+}
+
 async function fetchUnanalyzedMarkets(limit: number) {
   const supabase = getSupabaseClient();
   const config = await getAnalystConfig();
@@ -346,8 +393,9 @@ export async function getAnalysisCandidates(limit = 20) {
 
 async function analyzeBatch(markets: MarketForAnalysis[]) {
   const config = await getAnalystConfig();
-  const marketById = new Map(markets.map((market) => [market.id, market]));
-  const marketPayload = markets.map((market) => ({
+  const enriched = await enrichWithProbabilityChanges(markets);
+  const marketById = new Map(enriched.map((market) => [market.id, market]));
+  const marketPayload = enriched.map((market) => ({
     market_id: market.id,
     question: market.question,
     description: market.description,
@@ -356,6 +404,11 @@ async function analyzeBatch(markets: MarketForAnalysis[]) {
     liquidity: market.liquidity,
     category: market.category,
     end_date: market.end_date,
+    probability_change_24h_pct:
+      market.probability_change != null
+        ? Number((market.probability_change * 100).toFixed(1))
+        : null,
+    is_moving: market.probability_change != null && Math.abs(market.probability_change) > 0.10,
     deterministic_candidate_score: market.candidate_score,
     deterministic_candidate_reasons: market.candidate_reasons,
     deterministic_noise_flags: market.candidate_noise,

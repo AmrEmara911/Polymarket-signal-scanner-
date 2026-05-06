@@ -162,5 +162,21 @@ export async function fetchAndStoreMarkets(limit = 250): Promise<number> {
     throw new Error(`Supabase upsert error: ${error.message}`);
   }
 
+  // Record probability snapshot for movement detection
+  const snapshots = markets.map((m) => ({
+    market_id: m.id,
+    probability: m.probability,
+    recorded_at: fetchedAt,
+  }));
+
+  const { error: snapError } = await supabase
+    .from('probability_snapshots')
+    .insert(snapshots);
+
+  if (snapError) {
+    // Non-fatal — log but don't block ingest
+    console.warn('[Ingest] Snapshot insert warning:', snapError.message);
+  }
+
   return markets.length;
 }

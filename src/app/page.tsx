@@ -5,6 +5,21 @@ import { supabase } from '@/lib/supabase';
 
 type PipelineStatus = 'idle' | 'ingesting' | 'analyzing' | 'reporting' | 'done' | 'error';
 
+type MarketInfo = {
+  question: string;
+  probability: number;
+  volume: number;
+};
+
+type SignalRow = {
+  id: string;
+  markets: MarketInfo | MarketInfo[] | null;
+  probability_change: number | null;
+  affected_stocks: string[] | null;
+  urgency: string | null;
+  signal_type: string | null;
+};
+
 async function runPipeline(onStep: (status: PipelineStatus, msg: string) => void) {
   onStep('ingesting', 'Step 1/3 — Ingesting markets...');
   const ingestRes = await fetch('/api/ingest', { method: 'POST' });
@@ -33,7 +48,7 @@ export default function Dashboard() {
     highUrgency: 0,
     lastUpdated: '-'
   });
-  const [topSignals, setTopSignals] = useState<Record<string, unknown>[]>([]);
+  const [topSignals, setTopSignals] = useState<SignalRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>('idle');
   const [pipelineMessage, setPipelineMessage] = useState('');
@@ -60,7 +75,7 @@ export default function Dashboard() {
       const { count: totalScanned } = await supabase.from('markets').select('*', { count: 'exact', head: true });
       const { count: relevantFound } = await supabase.from('signals').select('*', { count: 'exact', head: true }).eq('is_relevant', true);
       const { count: highUrgency } = await supabase.from('signals').select('*', { count: 'exact', head: true }).eq('urgency', 'high');
-      
+
       const { data: latestSignal } = await supabase.from('signals').select('analyzed_at').order('analyzed_at', { ascending: false }).limit(1);
 
       setMetrics({
@@ -73,13 +88,12 @@ export default function Dashboard() {
       // Fetch Top Signals
       const { data: top } = await supabase
         .from('signals')
-        .select('*, markets(question, probability, volume)')
+        .select('id, markets(question, probability, volume), probability_change, affected_stocks, urgency, signal_type')
         .eq('is_relevant', true)
-        // Sort by urgency doesn't work perfectly via string (high, medium, low), but assuming 'high' is what we want most
         .order('confidence', { ascending: false })
         .limit(5);
 
-      if (top) setTopSignals(top);
+      if (top) setTopSignals(top as unknown as SignalRow[]);
       setLoading(false);
     }
     fetchData();
@@ -197,16 +211,27 @@ export default function Dashboard() {
                     <tr key={s.id} className="hover:bg-[#1f2937]/50 transition-colors">
                       <td className="px-6 py-4 font-medium text-white max-w-md truncate" title={m?.question}>{m?.question}</td>
                       <td className="px-6 py-4">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono w-12">{prob.toFixed(1)}%</span>
-                          <div className="w-16 h-1.5 bg-[#1f2937] rounded-full overflow-hidden">
-                            <div className="h-full bg-[#3b82f6]" style={{ width: `${prob}%` }}></div>
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono w-12">{prob.toFixed(1)}%</span>
+                            <div className="w-16 h-1.5 bg-[#1f2937] rounded-full overflow-hidden">
+                              <div className="h-full bg-[#3b82f6]" style={{ width: `${prob}%` }}></div>
+                            </div>
                           </div>
+                          {s.probability_change != null && Math.abs(s.probability_change) >= 0.10 && (
+                            <span className={`text-xs font-semibold px-1.5 py-0.5 rounded w-fit ${
+                              s.probability_change > 0
+                                ? 'bg-[#10b981]/20 text-[#10b981]'
+                                : 'bg-[#ef4444]/20 text-[#ef4444]'
+                            }`}>
+                              {s.probability_change > 0 ? '↑ +' : '↓ '}{(s.probability_change * 100).toFixed(0)}%
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex flex-wrap gap-1">
-                          {s.affected_stocks?.map((stock: string) => (
+                          {s.affected_stocks?.map((stock) => (
                             <span key={stock} className="px-2 py-0.5 rounded-full bg-[#3b82f6]/20 text-[#3b82f6] text-xs font-medium">
                               {stock}
                             </span>

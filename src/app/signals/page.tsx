@@ -3,8 +3,28 @@
 import React, { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 
+type MarketInfo = {
+  question: string;
+  probability: number;
+  volume: number;
+};
+
+type SignalRow = {
+  id: string;
+  markets: MarketInfo | MarketInfo[] | null;
+  probability_change: number | null;
+  affected_stocks: string[] | null;
+  urgency: string | null;
+  signal_type: string | null;
+  confidence: number | null;
+  is_relevant: boolean | null;
+  reason: string | null;
+  signal_direction: string | null;
+  analyzed_at: string;
+};
+
 export default function SignalsPage() {
-  const [signals, setSignals] = useState<Record<string, unknown>[]>([]);
+  const [signals, setSignals] = useState<SignalRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -16,24 +36,23 @@ export default function SignalsPage() {
 
   useEffect(() => {
     async function fetchSignals() {
-      const query = supabase
+      const { data } = await supabase
         .from('signals')
-        .select('*, markets(question, probability, volume)')
+        .select('id, markets(question, probability, volume), probability_change, affected_stocks, urgency, signal_type, confidence, is_relevant, reason, signal_direction, analyzed_at')
         .order('analyzed_at', { ascending: false })
         .limit(200);
 
-      const { data } = await query;
-      if (data) setSignals(data);
+      if (data) setSignals(data as unknown as SignalRow[]);
       setLoading(false);
     }
     fetchSignals();
   }, []);
 
   const filteredSignals = signals.filter(s => {
-    const m = Array.isArray(s.markets) ? s.markets[0] : (s.markets as Record<string, any>);
+    const m = Array.isArray(s.markets) ? s.markets[0] : s.markets;
     if (filterRelevant === 'relevant' && !s.is_relevant) return false;
-    if (filterUrgency !== 'All' && (s.urgency as string)?.toLowerCase() !== filterUrgency.toLowerCase()) return false;
-    if (filterType !== 'All' && (s.signal_type as string)?.toLowerCase() !== filterType.toLowerCase()) return false;
+    if (filterUrgency !== 'All' && s.urgency?.toLowerCase() !== filterUrgency.toLowerCase()) return false;
+    if (filterType !== 'All' && s.signal_type?.toLowerCase() !== filterType.toLowerCase()) return false;
     if (search && !m?.question?.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
@@ -44,15 +63,15 @@ export default function SignalsPage() {
 
       {/* Filter Bar */}
       <div className="bg-[#111827] border border-[#1f2937] p-4 rounded-xl flex flex-wrap gap-4 items-center shadow-sm">
-        <input 
-          type="text" 
-          placeholder="Search market question..." 
+        <input
+          type="text"
+          placeholder="Search market question..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="bg-[#0a0f1e] border border-[#1f2937] rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-[#3b82f6] min-w-[250px]"
         />
-        
-        <select 
+
+        <select
           value={filterRelevant}
           onChange={(e) => setFilterRelevant(e.target.value as 'all' | 'relevant')}
           className="bg-[#0a0f1e] border border-[#1f2937] rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-[#3b82f6]"
@@ -61,7 +80,7 @@ export default function SignalsPage() {
           <option value="relevant">Relevant Only</option>
         </select>
 
-        <select 
+        <select
           value={filterUrgency}
           onChange={(e) => setFilterUrgency(e.target.value)}
           className="bg-[#0a0f1e] border border-[#1f2937] rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-[#3b82f6]"
@@ -72,7 +91,7 @@ export default function SignalsPage() {
           <option value="Low">Low</option>
         </select>
 
-        <select 
+        <select
           value={filterType}
           onChange={(e) => setFilterType(e.target.value)}
           className="bg-[#0a0f1e] border border-[#1f2937] rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-[#3b82f6]"
@@ -83,7 +102,7 @@ export default function SignalsPage() {
           <option value="Company">Company</option>
           <option value="Sector">Sector</option>
         </select>
-        
+
         <div className="ml-auto text-sm text-[#9ca3af]">
           Showing {filteredSignals.length} results
         </div>
@@ -114,7 +133,7 @@ export default function SignalsPage() {
 
                 return (
                   <React.Fragment key={s.id}>
-                    <tr 
+                    <tr
                       onClick={() => setExpandedId(isExpanded ? null : s.id)}
                       className="hover:bg-[#1f2937]/50 transition-colors cursor-pointer"
                     >
@@ -125,9 +144,21 @@ export default function SignalsPage() {
                         <div className="text-xs mt-1 text-[#9ca3af] truncate max-w-[300px]">{s.reason}</div>
                       </td>
                       <td className="px-4 py-4">
-                        <span className={`font-mono ${prob > 60 ? 'text-[#10b981]' : prob > 40 ? 'text-[#f59e0b]' : 'text-[#ef4444]'}`}>
-                          {prob.toFixed(1)}%
-                        </span>
+                        <div className="flex flex-col gap-1">
+                          <span className={`font-mono ${prob > 60 ? 'text-[#10b981]' : prob > 40 ? 'text-[#f59e0b]' : 'text-[#ef4444]'}`}>
+                            {prob.toFixed(1)}%
+                          </span>
+                          {s.probability_change != null && Math.abs(s.probability_change) >= 0.10 && (
+                            <span className={`text-xs font-semibold px-1.5 py-0.5 rounded w-fit ${
+                              s.probability_change > 0
+                                ? 'bg-[#10b981]/20 text-[#10b981]'
+                                : 'bg-[#ef4444]/20 text-[#ef4444]'
+                            }`}>
+                              {s.probability_change > 0 ? '↑' : '↓'}{' '}
+                              {s.probability_change > 0 ? '+' : ''}{(s.probability_change * 100).toFixed(0)}%
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-4">
                         {s.is_relevant ? (
@@ -137,7 +168,7 @@ export default function SignalsPage() {
                         )}
                       </td>
                       <td className="px-4 py-4 font-mono">
-                        {((s.confidence || 0) * 100).toFixed(0)}%
+                        {((s.confidence ?? 0) * 100).toFixed(0)}%
                       </td>
                       <td className="px-4 py-4">
                         {s.signal_type && (
@@ -148,13 +179,13 @@ export default function SignalsPage() {
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex flex-wrap gap-1 max-w-[150px]">
-                          {s.affected_stocks?.slice(0, 3).map((stock: string) => (
+                          {s.affected_stocks?.slice(0, 3).map((stock) => (
                             <span key={stock} className="px-2 py-0.5 rounded-full bg-[#3b82f6]/20 text-[#3b82f6] text-xs font-medium">
                               {stock}
                             </span>
                           ))}
-                          {s.affected_stocks?.length > 3 && (
-                            <span className="px-2 py-0.5 text-xs">+{s.affected_stocks.length - 3}</span>
+                          {(s.affected_stocks?.length ?? 0) > 3 && (
+                            <span className="px-2 py-0.5 text-xs">+{(s.affected_stocks?.length ?? 0) - 3}</span>
                           )}
                         </div>
                       </td>
@@ -170,7 +201,7 @@ export default function SignalsPage() {
                         )}
                       </td>
                     </tr>
-                    
+
                     {/* Expanded Row Content */}
                     {isExpanded && (
                       <tr className="bg-[#0a0f1e]/50">
@@ -179,7 +210,7 @@ export default function SignalsPage() {
                             <div>
                               <h4 className="font-semibold text-white mb-2">Market Details</h4>
                               <p className="text-gray-300 mb-4">{m?.question}</p>
-                              
+
                               <h4 className="font-semibold text-white mb-2">Analysis Reason</h4>
                               <p className="text-gray-300 leading-relaxed">{s.reason}</p>
                             </div>

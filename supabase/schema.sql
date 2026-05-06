@@ -130,6 +130,18 @@ create table if not exists pipeline_runs (
   error text
 );
 
+create table if not exists probability_snapshots (
+  id uuid default gen_random_uuid() primary key,
+  market_id text references markets(id),
+  probability float,
+  recorded_at timestamptz default now()
+);
+
+create index if not exists prob_snapshots_market_time_idx
+  on probability_snapshots (market_id, recorded_at desc);
+
+alter table signals add column if not exists probability_change float;
+
 create table if not exists config (
   key text primary key,
   value text,

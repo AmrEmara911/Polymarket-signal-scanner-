@@ -19,6 +19,7 @@ interface SignalWithMarket {
   evidence: string[];
   key_risks: string[];
   suggested_action: string;
+  probability_change: number | null;
   analyzed_at: string;
   markets: {
     id: string;
@@ -198,9 +199,13 @@ export async function generateSignalReport(limit = 12): Promise<GeneratedReport 
         ? `$${s.markets.volume.toLocaleString()}`
         : 'n/a';
       const stocks = s.affected_stocks?.length ? s.affected_stocks.join(', ') : 'none identified';
+      const changeStr =
+        s.probability_change != null && Math.abs(s.probability_change) >= 0.05
+          ? ` | 24h move: ${s.probability_change > 0 ? '+' : ''}${(s.probability_change * 100).toFixed(1)}pp${Math.abs(s.probability_change) > 0.10 ? ' ⚡ MOVING' : ''}`
+          : '';
       return [
         `Question: ${s.markets?.question ?? '(unknown)'}`,
-        `Probability: ${prob} | Volume: ${vol}`,
+        `Probability: ${prob}${changeStr} | Volume: ${vol}`,
         `Affected stocks: ${stocks}`,
         `Direction: ${s.signal_direction ?? 'unclear'} | Urgency: ${s.urgency}`,
         `Reason: ${s.reason}`,
@@ -224,6 +229,8 @@ Return JSON only:
     {
       role: 'user',
       content: `Write a morning signal briefing for BIT Capital portfolio managers based on these Polymarket prediction markets.
+
+Pay special attention to markets that have moved significantly in the last 24 hours — these are the most actionable signals. Markets tagged ⚡ MOVING have shifted more than 10 percentage points since yesterday; treat them with higher priority and explain what drove the move.
 
 Active signals:
 ${signalLines}
