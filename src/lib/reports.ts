@@ -160,6 +160,7 @@ export async function generateSignalReport(limit = 12): Promise<GeneratedReport 
       evidence,
       key_risks,
       suggested_action,
+      probability_change,
       analyzed_at,
       markets (
         id,
@@ -199,16 +200,25 @@ export async function generateSignalReport(limit = 12): Promise<GeneratedReport 
         ? `$${s.markets.volume.toLocaleString()}`
         : 'n/a';
       const stocks = s.affected_stocks?.length ? s.affected_stocks.join(', ') : 'none identified';
+
+      const absChange = s.probability_change != null ? Math.abs(s.probability_change) : null;
       const changeStr =
-        s.probability_change != null && Math.abs(s.probability_change) >= 0.05
-          ? ` | 24h move: ${s.probability_change > 0 ? '+' : ''}${(s.probability_change * 100).toFixed(1)}pp${Math.abs(s.probability_change) > 0.10 ? ' ⚡ MOVING' : ''}`
-          : '';
+        s.probability_change != null && absChange != null && absChange >= 0.05
+          ? `${s.probability_change > 0 ? '+' : ''}${(s.probability_change * 100).toFixed(1)}pp in 24h${absChange > 0.10 ? ' ⚡ MOVING' : ''}`
+          : 'stable';
+
+      const thesisStr = s.thesis ? s.thesis.slice(0, 300) : s.reason;
+      const risksStr = Array.isArray(s.key_risks) && s.key_risks.length
+        ? s.key_risks.slice(0, 2).join('; ')
+        : 'none noted';
+
       return [
         `Question: ${s.markets?.question ?? '(unknown)'}`,
-        `Probability: ${prob}${changeStr} | Volume: ${vol}`,
+        `Probability: ${prob} | 24h change: ${changeStr} | Volume: ${vol}`,
         `Affected stocks: ${stocks}`,
-        `Direction: ${s.signal_direction ?? 'unclear'} | Urgency: ${s.urgency}`,
-        `Reason: ${s.reason}`,
+        `Direction: ${s.signal_direction ?? 'unclear'} | Urgency: ${s.urgency} | Type: ${s.signal_type ?? 'unclassified'}`,
+        `Thesis: ${thesisStr}`,
+        `Key risks: ${risksStr}`,
       ].join('\n');
     })
     .join('\n\n---\n\n');
@@ -216,7 +226,9 @@ export async function generateSignalReport(limit = 12): Promise<GeneratedReport 
   const response = await callOpenAIJson<ReportResponse>([
     {
       role: 'system',
-      content: `You are a senior investment analyst at BIT Capital, a Berlin-based tech fund managing over €1B in assets. You write morning briefings for portfolio managers who are pressed for time and need sharp, actionable insight. Your writing is direct, specific, and opinionated. You never summarize data — you interpret it.
+      content: `You are a senior investment analyst at BIT Capital GmbH, a Berlin-based asset manager with $2.7B AUM. You write morning briefings for portfolio managers who are pressed for time and need sharp, actionable insight. Your writing is direct, specific, and opinionated. You never summarize data — you interpret it. You never hedge every sentence into meaninglessness.
+
+${BITCAP_RESEARCH_CONTEXT}
 
 Return JSON only:
 {
@@ -230,7 +242,7 @@ Return JSON only:
       role: 'user',
       content: `Write a morning signal briefing for BIT Capital portfolio managers based on these Polymarket prediction markets.
 
-Pay special attention to markets that have moved significantly in the last 24 hours — these are the most actionable signals. Markets tagged ⚡ MOVING have shifted more than 10 percentage points since yesterday; treat them with higher priority and explain what drove the move.
+Each signal includes its current probability AND how much it has moved in the last 24 hours. The 24h change is as important as the current level — a market at 60% that was at 45% yesterday is a different animal from one that has been at 60% for a week. Markets tagged ⚡ MOVING have shifted more than 10 percentage points since yesterday; lead with the movement, not just the level. Explain what likely drove the shift.
 
 Active signals:
 ${signalLines}
@@ -241,33 +253,39 @@ Your briefing MUST follow this exact structure:
 # BIT Capital Signal Briefing — ${today}
 
 ## Market Pulse (2-3 sentences max)
-One sharp paragraph on what the prediction markets are collectively signaling about the macro environment right now. Be specific. Name numbers.
+What are the prediction markets collectively signaling right now? Name specific probabilities and movements. If something has moved sharply in the last 24 hours, that is the lede.
 
 ## Top 3 Signals to Act On
 
-For each signal:
-**[Signal name]** — [probability]% probability
-*What the market is pricing:* [one sentence]
-*What this means for our portfolio:* [specific stock impact, bullish or bearish, magnitude]
-*What would change this view:* [specific trigger to watch]
+For each signal, use this format exactly:
+
+**[Descriptive signal name — not the raw market question]** — [probability]% ([+/-Xpp vs yesterday] if it moved, or "stable" if not)
+*What the market is pricing:* [one sentence — the actual bet being made]
+*Why it moved:* [if 24h change ≥ 5pp, explain what likely drove the shift; if stable, write "No significant movement — this is a slow-building thesis"]
+*Portfolio impact:* [specific stock(s) from our holdings, bullish or bearish, rough magnitude]
+*Trigger to watch:* [one specific event or data point that would reprice this materially]
 *Conviction:* High / Medium / Low
 
 ## Portfolio Exposure Summary
-Which of our holdings (NVDA, ASML, MSFT, GOOGL, AMZN, META, TSMC, AMD, AMAT, AAPL, VISA, ADYEN, PAYPAL) have the most signals pointing at them today, and what is the net direction?
+Which of our holdings (IREN, MSFT, GOOGL, META, NVDA, SOFI, RDDT, HIMS, LMND, HNGE, CRCL, APLD, COHR, GLXY, NTSK) have the most signals pointing at them today? For each exposed name, give the net direction (net bullish / net bearish / conflicted) and one sentence on why.
 
 ## Contrarian Take
-One market where the crowd is probably wrong and why. Be specific. Show your reasoning.
+One market where the crowd is probably wrong. State the current probability, explain the consensus view embedded in it, then argue specifically why that consensus is mistaken. Do not hedge — pick a side.
 
 ## What to Watch Today
-Three specific things to monitor that could move these probabilities significantly.
+Three specific catalysts — scheduled events, data releases, or news triggers — that could move these probabilities by 10+ points before tomorrow's briefing.
+
+## Risk to This View
+One paragraph. Assume every signal in this briefing is wrong simultaneously — what is the scenario where that happens? What would the world have to look like for the prediction markets to be systematically mispricing everything we flagged today? Be specific. This is not a disclaimer — it is intellectual honesty about the limits of prediction market signals.
 ---
 
-Important rules:
+Writing rules:
 - Never show Market IDs
-- Never say 'the data shows' or 'according to the signals'
-- Write as if you are the analyst, not a system summarizing data
-- Be bullish or bearish — never neutral or vague
-- If two signals conflict, call it out explicitly`,
+- Never say "the data shows", "according to the signals", or "it is worth noting"
+- Write as the analyst, not as a system narrating data
+- Be bullish or bearish — never just "mixed exposure"
+- When a market has moved significantly, that movement is the story, not the current level
+- If two signals point in opposite directions for the same stock, call the conflict out explicitly`,
     },
   ]);
 
