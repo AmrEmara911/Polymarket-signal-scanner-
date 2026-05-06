@@ -32,13 +32,23 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
+    const supabase = getSupabaseClient();
+    const now = new Date().toISOString();
+
+    // Generic key/value upsert — used for arbitrary config (e.g. filter_sensitivity)
+    if (typeof body.key === 'string' && body.value !== undefined) {
+      await supabase
+        .from('config')
+        .upsert({ key: body.key, value: String(body.value), updated_at: now }, { onConflict: 'key' });
+      return NextResponse.json({ success: true, key: body.key, value: body.value });
+    }
+
+    // Scheduler-specific config
     const intervalHours: IntervalHours = VALID_INTERVALS.includes(body.intervalHours)
       ? body.intervalHours
       : 6;
     const enabled: boolean = body.enabled !== false;
 
-    const supabase = getSupabaseClient();
-    const now = new Date().toISOString();
     await supabase.from('config').upsert(
       [
         { key: 'scheduler_interval_hours', value: String(intervalHours), updated_at: now },

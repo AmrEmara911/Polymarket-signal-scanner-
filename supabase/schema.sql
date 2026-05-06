@@ -148,6 +148,10 @@ create table if not exists config (
   updated_at timestamptz default now()
 );
 
+insert into config (key, value)
+values ('filter_sensitivity', 'balanced')
+on conflict (key) do nothing;
+
 create index if not exists markets_active_volume_idx on markets (is_active, volume desc);
 create index if not exists signals_relevance_idx on signals (is_relevant, relevance_score desc);
 create index if not exists reports_generated_at_idx on reports (generated_at desc);

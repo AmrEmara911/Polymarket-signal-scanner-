@@ -70,8 +70,8 @@ export default function SettingsPage() {
     SECTORS_LIST.reduce((acc, curr) => ({ ...acc, [curr]: true }), {})
   );
   const [sensitivity, setSensitivity] = useState<Sensitivity>('balanced');
-  const [sensitivitySaved, setSensitivitySaved] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Scheduler state
   const [intervalHours, setIntervalHours] = useState(6);
@@ -84,6 +84,8 @@ export default function SettingsPage() {
     const savedStocks = localStorage.getItem('bitcap_watched_stocks');
     if (savedStocks) setStocks(savedStocks);
 
+    // Load sensitivity from localStorage (DB is source of truth for analyze route;
+    // localStorage keeps the UI in sync until the next explicit Save)
     const savedSensitivity = localStorage.getItem('filter_sensitivity') as Sensitivity | null;
     if (savedSensitivity && INDEX_SENSITIVITY.includes(savedSensitivity)) {
       setSensitivity(savedSensitivity);
@@ -120,18 +122,33 @@ export default function SettingsPage() {
     setSectors(prev => ({ ...prev, [sector]: !prev[sector] }));
   };
 
-  const handleSensitivitySave = (value: Sensitivity) => {
+  // Slider change — updates local state only; backend write happens on Save
+  const handleSensitivityChange = (value: Sensitivity) => {
     setSensitivity(value);
     localStorage.setItem('filter_sensitivity', value);
-    setSensitivitySaved(true);
-    setTimeout(() => setSensitivitySaved(false), 2000);
   };
 
-  const handleSave = () => {
-    localStorage.setItem('bitcap_watched_stocks', stocks);
-    localStorage.setItem('bitcap_watched_sectors', JSON.stringify(sectors));
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+  const handleSave = async () => {
+    setSaveError(null);
+    try {
+      // Persist sensitivity to DB so the analyze route picks it up
+      const res = await fetch('/api/scheduler/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'filter_sensitivity', value: sensitivity }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error ?? 'Failed to save sensitivity');
+
+      // Persist watched stocks / sectors to localStorage
+      localStorage.setItem('bitcap_watched_stocks', stocks);
+      localStorage.setItem('bitcap_watched_sectors', JSON.stringify(sectors));
+
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to save configuration');
+    }
   };
 
   const handleSchedulerSave = async () => {
@@ -222,8 +239,11 @@ export default function SettingsPage() {
         {saved && (
           <div className="flex items-center gap-2 text-[#10b981]">
             <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
-            <span className="text-sm font-medium">Settings saved</span>
+            <span className="text-sm font-medium">Configuration saved. Applied on next pipeline run.</span>
           </div>
+        )}
+        {saveError && (
+          <p className="text-sm text-[#ef4444]">{saveError}</p>
         )}
       </div>
 
@@ -242,7 +262,7 @@ export default function SettingsPage() {
               {SENSITIVITY_OPTIONS.map((opt, i) => (
                 <button
                   key={opt.value}
-                  onClick={() => handleSensitivitySave(opt.value)}
+                  onClick={() => handleSensitivityChange(opt.value)}
                   className={`text-sm font-semibold transition-colors ${
                     sensitivity === opt.value ? 'text-[#3b82f6]' : 'text-[#6b7280] hover:text-[#9ca3af]'
                   }`}
@@ -261,7 +281,7 @@ export default function SettingsPage() {
                 max={2}
                 step={1}
                 value={SENSITIVITY_INDEX[sensitivity]}
-                onChange={(e) => handleSensitivitySave(INDEX_SENSITIVITY[Number(e.target.value)])}
+                onChange={(e) => handleSensitivityChange(INDEX_SENSITIVITY[Number(e.target.value)])}
                 className="w-full h-2 rounded-full appearance-none cursor-pointer"
                 style={{
                   background: `linear-gradient(to right, #3b82f6 0%, #3b82f6 ${SENSITIVITY_INDEX[sensitivity] * 50}%, #1f2937 ${SENSITIVITY_INDEX[sensitivity] * 50}%, #1f2937 100%)`,
@@ -289,9 +309,7 @@ export default function SettingsPage() {
                   <span className="text-xs px-2 py-0.5 rounded-full bg-[#3b82f6]/20 text-[#3b82f6] font-medium">
                     {opt.expected}
                   </span>
-                  {sensitivitySaved && (
-                    <span className="text-xs text-[#10b981] font-medium ml-auto">✓ Saved</span>
-                  )}
+                  <span className="text-xs text-[#6b7280] ml-auto">Saved on next ↓</span>
                 </div>
                 <p className="text-sm text-[#9ca3af]">{opt.description}</p>
               </div>
