@@ -83,6 +83,24 @@ function daysUntilExpiry(endDate: string | null): number {
   return (new Date(endDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24);
 }
 
+function isAnnualProductCycleMarket(question: string): boolean {
+  const text = question.toLowerCase();
+  const hasReleaseVerb = /\b(release|launch|ship|announce|unveil|introduce)\b/.test(text);
+  const hasAnnualProduct =
+    /\b(iphone|ipad|macbook|mac pro|apple watch|galaxy s|galaxy z|pixel \d|surface pro|surface laptop|windows \d+|next (iphone|ipad|pixel|galaxy))\b/.test(text);
+  const hasYear = /\b(20\d{2})\b/.test(text);
+  return hasReleaseVerb && hasAnnualProduct && hasYear;
+}
+
+function isProductOrEarningsMarket(question: string): boolean {
+  const text = question.toLowerCase();
+  return (
+    /\b(release|launch|ship|announce|unveil)\b/.test(text) ||
+    /\b(earnings|revenue|eps|quarterly (results|earnings)|q[1-4] (earnings|results|revenue))\b/.test(text) ||
+    /\b(beat|miss|exceed).*(earnings|estimates|expectations|consensus)\b/.test(text)
+  );
+}
+
 function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSignal {
   // Rule 1: direct equity price targets are never useful signals
   if (isDirectEquityPriceMarket(market.question)) {
@@ -122,7 +140,35 @@ function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSign
     };
   }
 
-  // Rule 3: low confidence signals are not actionable
+  // Rule 3: annual product cycle near-certainties have no signal value
+  if (isAnnualProductCycleMarket(market.question)) {
+    return {
+      ...signal,
+      is_relevant: false,
+      relevance_score: 0.1,
+      urgency: 'low',
+      reason: 'Annual product cycle market — foregone conclusion with no independent signal value for portfolio positioning.',
+      affected_stocks: [],
+      affected_sectors: [],
+      signal_type: null,
+      signal_direction: null,
+    };
+  }
+
+  // Rule 4: probability > 92% on product release or earnings → already fully priced in
+  const prob = clamp(market.probability, 0);
+  if (prob > 0.92 && isProductOrEarningsMarket(market.question)) {
+    return {
+      ...signal,
+      is_relevant: false,
+      relevance_score: Math.min(clamp(signal.relevance_score, 0.2), 0.25),
+      urgency: 'low',
+      reason: `Probability ${(prob * 100).toFixed(0)}% — market is fully priced in and offers no actionable edge for a portfolio manager.`,
+      signal_direction: null,
+    };
+  }
+
+  // Rule 5: low confidence signals are not actionable
   if (clamp(signal.confidence, 0) < 0.4) {
     return {
       ...signal,
@@ -131,7 +177,7 @@ function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSign
     };
   }
 
-  // Rule 4: no stocks and no signal type means the transmission path is undefined
+  // Rule 6: no stocks and no signal type means the transmission path is undefined
   const hasStocks = Array.isArray(signal.affected_stocks) && signal.affected_stocks.length > 0;
   if (!hasStocks && signal.signal_type === null) {
     return {
@@ -331,6 +377,8 @@ EXPLICITLY REJECT these market types (set is_relevant: false, relevance_score < 
 - Sports markets even if they mention company names or sponsors.
 - Non-tech political markets with no clear tech equity transmission path (elections, immigration, crime).
 - Oil, real estate, agriculture, and commodity markets unless directly tied to tech supply chains.
+- Annual product cycle near-certainties: "Will Apple release an iPhone in 2025?" or "Will [company] release [annual product] in [year]?" — these are foregone conclusions, not signals.
+- Any product release or earnings market where probability is already above 92% — it is fully priced in and offers no actionable edge.
 
 EXPLICITLY INCLUDE these high-value market types (set is_relevant: true when probability is non-trivial):
 - Fed rate decisions and monetary policy shifts that reprice growth equities.
