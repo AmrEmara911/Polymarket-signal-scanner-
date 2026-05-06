@@ -37,6 +37,22 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>('idle');
   const [pipelineMessage, setPipelineMessage] = useState('');
+  const [schedulerInfo, setSchedulerInfo] = useState<{
+    schedule: string;
+    next_run: string | null;
+    last_run: string | null;
+  }>({ schedule: 'Every 6 hours', next_run: null, last_run: null });
+
+  useEffect(() => {
+    fetch('/api/scheduler')
+      .then(r => r.json())
+      .then(data => setSchedulerInfo({
+        schedule: data.schedule ?? 'Every 6 hours',
+        next_run: data.next_run ?? null,
+        last_run: data.last_run ?? null,
+      }))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     async function fetchData() {
@@ -115,6 +131,23 @@ export default function Dashboard() {
               {pipelineMessage}
             </p>
           )}
+          <div className="text-xs text-[#6b7280] text-right space-y-0.5">
+            <p>🕐 <span className="text-[#9ca3af]">{schedulerInfo.schedule}</span></p>
+            <p>Last run:{' '}
+              <span className="text-[#9ca3af]">
+                {schedulerInfo.last_run
+                  ? new Date(schedulerInfo.last_run).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                  : 'Not yet'}
+              </span>
+            </p>
+            <p>Next run:{' '}
+              <span className="text-[#10b981]">
+                {schedulerInfo.next_run
+                  ? new Date(schedulerInfo.next_run).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                  : '—'}
+              </span>
+            </p>
+          </div>
         </div>
       </div>
 

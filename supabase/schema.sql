@@ -130,6 +130,12 @@ create table if not exists pipeline_runs (
   error text
 );
 
+create table if not exists config (
+  key text primary key,
+  value text,
+  updated_at timestamptz default now()
+);
+
 create index if not exists markets_active_volume_idx on markets (is_active, volume desc);
 create index if not exists signals_relevance_idx on signals (is_relevant, relevance_score desc);
 create index if not exists reports_generated_at_idx on reports (generated_at desc);
