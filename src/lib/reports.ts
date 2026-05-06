@@ -183,49 +183,84 @@ export async function generateSignalReport(limit = 12): Promise<GeneratedReport 
   const reportSignals = selectReportSignals((signals ?? []) as unknown as SignalWithMarket[], limit);
   if (!reportSignals.length) return null;
 
+  const today = new Date().toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  });
+
+  const signalLines = reportSignals
+    .map((s) => {
+      const prob = s.markets?.probability != null
+        ? `${(s.markets.probability * 100).toFixed(0)}%`
+        : 'n/a';
+      const vol = s.markets?.volume != null
+        ? `$${s.markets.volume.toLocaleString()}`
+        : 'n/a';
+      const stocks = s.affected_stocks?.length ? s.affected_stocks.join(', ') : 'none identified';
+      return [
+        `Question: ${s.markets?.question ?? '(unknown)'}`,
+        `Probability: ${prob} | Volume: ${vol}`,
+        `Affected stocks: ${stocks}`,
+        `Direction: ${s.signal_direction ?? 'unclear'} | Urgency: ${s.urgency}`,
+        `Reason: ${s.reason}`,
+      ].join('\n');
+    })
+    .join('\n\n---\n\n');
+
   const response = await callOpenAIJson<ReportResponse>([
     {
       role: 'system',
-      content: `You write concise investment signal reports for analysts at a tech-focused public equities fund.
-
-${BITCAP_RESEARCH_CONTEXT}
-
-The report must contain actual investment reasoning. Do not simply summarize each market. Explain the equity transmission path, affected tickers, scenario implications, why the probability is interesting, and what an analyst should verify next. Be direct about weak signals and uncertainty.
-
-Quality constraints:
-- Do not include direct stock-price threshold markets as top ideas.
-- Prefer exogenous catalysts: rates, inflation, tariffs/export controls, AI regulation, antitrust, crypto regulation, supply-chain/geopolitical shocks, and fundamental company milestones.
-- Every included signal must explain the transmission path to revenue, margins, multiples, risk appetite, or supply chains.
-- Call out when probability is already near consensus and therefore less actionable.
-- The report should be useful for an analyst morning meeting, not a market-data dump.
+      content: `You are a senior investment analyst at BIT Capital, a Berlin-based tech fund managing over €1B in assets. You write morning briefings for portfolio managers who are pressed for time and need sharp, actionable insight. Your writing is direct, specific, and opinionated. You never summarize data — you interpret it.
 
 Return JSON only:
 {
   "title": "string",
   "summary": "3-5 sentence executive summary",
   "key_takeaways": ["string"],
-  "markdown_report": "markdown report with sections"
+  "markdown_report": "markdown string following the exact structure below"
 }`,
     },
     {
       role: 'user',
-      content: `Analyst configuration:
-Sectors: ${config.sectors.join(', ')}
-Stocks: ${config.stocks.join(', ')}
-Focus notes: ${config.focus_notes}
+      content: `Write a morning signal briefing for BIT Capital portfolio managers based on these Polymarket prediction markets.
 
-Relevant Polymarket signals:
-${JSON.stringify(reportSignals, null, 2)}
+Active signals:
+${signalLines}
 
-Write today's signal report. Include:
-- a 4-6 sentence executive brief
-- 3 to 6 top signals ranked by expected usefulness
-- affected stocks and sectors
-- probability/volume context
-- bullish or bearish interpretation where possible
-- what could make the signal wrong
-- next research checks for an analyst
-- a short "Excluded noise" note describing what was intentionally left out`,
+Your briefing MUST follow this exact structure:
+
+---
+# BIT Capital Signal Briefing — ${today}
+
+## Market Pulse (2-3 sentences max)
+One sharp paragraph on what the prediction markets are collectively signaling about the macro environment right now. Be specific. Name numbers.
+
+## Top 3 Signals to Act On
+
+For each signal:
+**[Signal name]** — [probability]% probability
+*What the market is pricing:* [one sentence]
+*What this means for our portfolio:* [specific stock impact, bullish or bearish, magnitude]
+*What would change this view:* [specific trigger to watch]
+*Conviction:* High / Medium / Low
+
+## Portfolio Exposure Summary
+Which of our holdings (NVDA, ASML, MSFT, GOOGL, AMZN, META, TSMC, AMD, AMAT, AAPL, VISA, ADYEN, PAYPAL) have the most signals pointing at them today, and what is the net direction?
+
+## Contrarian Take
+One market where the crowd is probably wrong and why. Be specific. Show your reasoning.
+
+## What to Watch Today
+Three specific things to monitor that could move these probabilities significantly.
+---
+
+Important rules:
+- Never show Market IDs
+- Never say 'the data shows' or 'according to the signals'
+- Write as if you are the analyst, not a system summarizing data
+- Be bullish or bearish — never neutral or vague
+- If two signals conflict, call it out explicitly`,
     },
   ]);
 
