@@ -1,17 +1,14 @@
 import { NextResponse } from 'next/server';
-import { fetchAndStoreMarkets } from '@/lib/polymarket';
+import { generateSignalReport } from '@/lib/reports';
 
 export const dynamic = 'force-dynamic';
 
-async function handler() {
+export async function POST() {
   try {
-    const count = await fetchAndStoreMarkets();
-    return NextResponse.json({ success: true, count });
+    const report = await generateSignalReport();
+    return NextResponse.json({ success: true, report });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }
-
-export const GET = handler;
-export const POST = handler;

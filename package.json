@@ -1,22 +1,26 @@
 {
-  "name": "polymarket-temp-setup",
+  "name": "polymarket-signal-scanner",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "pipeline": "node -e \"fetch('http://localhost:3000/api/pipeline',{method:'POST'}).then(r=>r.json()).then(console.log)\"",
+    "scheduler": "node scheduler.js",
     "lint": "next lint"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
     "@supabase/supabase-js": "^2.105.3",
     "next": "14.2.35",
+    "node-cron": "^4.2.1",
+    "openai": "^6.36.0",
     "react": "^18",
     "react-dom": "^18"
   },
   "devDependencies": {
     "@types/node": "^20",
+    "@types/node-cron": "^3.0.11",
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "eslint": "^8",

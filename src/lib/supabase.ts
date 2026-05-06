@@ -1,17 +1,41 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const publicSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const publicSupabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-if (!supabaseUrl) {
+if (!publicSupabaseUrl) {
   throw new Error(
-    'Missing NEXT_PUBLIC_SUPABASE_URL — add it to .env.local and restart the dev server.'
-  );
-}
-if (!supabaseAnonKey) {
-  throw new Error(
-    'Missing NEXT_PUBLIC_SUPABASE_ANON_KEY — add it to .env.local and restart the dev server.'
+    'Missing NEXT_PUBLIC_SUPABASE_URL - add it to .env.local and restart the dev server.'
   );
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+if (!publicSupabaseAnonKey) {
+  throw new Error(
+    'Missing NEXT_PUBLIC_SUPABASE_ANON_KEY - add it to .env.local and restart the dev server.'
+  );
+}
+
+export const supabase = createClient(publicSupabaseUrl, publicSupabaseAnonKey, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+  },
+});
+
+export function getSupabaseClient() {
+  const supabaseKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!supabaseKey) {
+    throw new Error(
+      'Missing SUPABASE_SERVICE_ROLE_KEY or NEXT_PUBLIC_SUPABASE_ANON_KEY - add one to .env.local and restart the dev server.'
+    );
+  }
+
+  return createClient(publicSupabaseUrl!, supabaseKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  });
+}

@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 import { analyzeMarkets } from '@/lib/filter';
 
-export async function GET() {
+export const dynamic = 'force-dynamic';
+
+async function handler() {
   try {
     const result = await analyzeMarkets();
     return NextResponse.json({ success: true, ...result });
@@ -10,3 +12,6 @@ export async function GET() {
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }
+
+export const GET = handler;
+export const POST = handler;
