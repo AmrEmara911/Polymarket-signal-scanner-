@@ -9,7 +9,7 @@ export default function SignalsPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   // Filters
-  const [filterRelevant, setFilterRelevant] = useState<'all' | 'relevant'>('all');
+  const [filterRelevant, setFilterRelevant] = useState<'all' | 'relevant'>('relevant');
   const [filterUrgency, setFilterUrgency] = useState('All');
   const [filterType, setFilterType] = useState('All');
   const [search, setSearch] = useState('');
