@@ -78,28 +78,70 @@ function isDirectEquityPriceMarket(question: string) {
   return hasTicker && hasPriceLevel && hasPriceAction;
 }
 
-function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSignal {
-  if (!isDirectEquityPriceMarket(market.question)) return signal;
+function daysUntilExpiry(endDate: string | null): number {
+  if (!endDate) return Infinity;
+  return (new Date(endDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24);
+}
 
-  return {
-    ...signal,
-    is_relevant: false,
-    relevance_score: Math.min(clamp(signal.relevance_score, 0.25), 0.35),
-    confidence: Math.max(clamp(signal.confidence, 0.7), 0.7),
-    reason:
-      'Direct stock-price prediction markets are derivative of equity prices, not independent Polymarket signals for analysts.',
-    affected_stocks: [],
-    affected_sectors: [],
-    signal_type: null,
-    signal_direction: null,
-    urgency: 'low',
-    thesis:
-      'This market may describe where the stock trades, but it does not explain an external catalyst such as rates, regulation, tariffs, supply chains, product adoption, or company fundamentals.',
-    evidence: ['The question is framed around a ticker crossing a price level.'],
-    key_risks: ['Using this as a signal would double-count public equity market pricing.'],
-    suggested_action:
-      'Exclude from analyst report unless paired with a separate catalyst market that explains why the equity price should move.',
-  };
+function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSignal {
+  // Rule 1: direct equity price targets are never useful signals
+  if (isDirectEquityPriceMarket(market.question)) {
+    return {
+      ...signal,
+      is_relevant: false,
+      relevance_score: Math.min(clamp(signal.relevance_score, 0.25), 0.35),
+      confidence: Math.max(clamp(signal.confidence, 0.7), 0.7),
+      reason:
+        'Direct stock-price prediction markets are derivative of equity prices, not independent Polymarket signals for analysts.',
+      affected_stocks: [],
+      affected_sectors: [],
+      signal_type: null,
+      signal_direction: null,
+      urgency: 'low',
+      thesis:
+        'This market may describe where the stock trades, but it does not explain an external catalyst such as rates, regulation, tariffs, supply chains, product adoption, or company fundamentals.',
+      evidence: ['The question is framed around a ticker crossing a price level.'],
+      key_risks: ['Using this as a signal would double-count public equity market pricing.'],
+      suggested_action:
+        'Exclude from analyst report unless paired with a separate catalyst market that explains why the equity price should move.',
+    };
+  }
+
+  // Rule 2: expiring within 3 days AND is a price target → reject
+  if (daysUntilExpiry(market.end_date) <= 3 && isDirectEquityPriceMarket(market.question)) {
+    return {
+      ...signal,
+      is_relevant: false,
+      relevance_score: 0.1,
+      urgency: 'low',
+      reason: 'Market expires within 3 days and is a short-term price target — not a strategic signal.',
+      affected_stocks: [],
+      affected_sectors: [],
+      signal_type: null,
+      signal_direction: null,
+    };
+  }
+
+  // Rule 3: low confidence signals are not actionable
+  if (clamp(signal.confidence, 0) < 0.4) {
+    return {
+      ...signal,
+      is_relevant: false,
+      reason: `Confidence too low (${signal.confidence?.toFixed?.(2) ?? '?'}) to be actionable. ${signal.reason}`,
+    };
+  }
+
+  // Rule 4: no stocks and no signal type means the transmission path is undefined
+  const hasStocks = Array.isArray(signal.affected_stocks) && signal.affected_stocks.length > 0;
+  if (!hasStocks && signal.signal_type === null) {
+    return {
+      ...signal,
+      is_relevant: false,
+      reason: 'No affected stocks or signal type identified — transmission path to equities is undefined.',
+    };
+  }
+
+  return signal;
 }
 
 function normalizeSignal(
@@ -281,6 +323,25 @@ async function analyzeBatch(markets: MarketForAnalysis[]) {
 ${BITCAP_RESEARCH_CONTEXT}
 
 Your job is judgment, not keyword matching. A market can be relevant even when it does not name a company if the event has a clear transmission path to public equities. Penalize vague markets, low-volume markets, sports/entertainment noise, and markets whose effect is already too indirect.
+
+EXPLICITLY REJECT these market types (set is_relevant: false, relevance_score < 0.3):
+- Same-day or short-term price targets: "Will AAPL close above $X on [specific date]?", "Will AMZN close above $X on May 6?" — these are trivial price bets, not strategic signals.
+- Celebrity or entertainment markets disguised as company markets: "Will Elon Musk tweet X times?"
+- Markets expiring within 7 days that are pure price predictions with no fundamental catalyst.
+- Sports markets even if they mention company names or sponsors.
+- Non-tech political markets with no clear tech equity transmission path (elections, immigration, crime).
+- Oil, real estate, agriculture, and commodity markets unless directly tied to tech supply chains.
+
+EXPLICITLY INCLUDE these high-value market types (set is_relevant: true when probability is non-trivial):
+- Fed rate decisions and monetary policy shifts that reprice growth equities.
+- Semiconductor tariffs, export controls, and trade restrictions (especially US-China, Taiwan).
+- AI regulation, antitrust actions, or consent decrees against big tech.
+- Company earnings beating or missing by significant margins.
+- Major M&A events, acquisitions, or divestitures for tech companies.
+- Geopolitical events affecting semiconductor supply chains.
+- IPOs of major tech companies that affect market dynamics or sector sentiment.
+- Crypto regulation, ETF approvals or rejections, and exchange licensing decisions.
+- Central bank digital currency decisions affecting fintech and payment networks.
 
 Important quality rule: direct markets about a listed stock crossing a price level, closing above/below a price, or hitting a high/low are usually NOT useful signals. They restate equity market pricing rather than explaining an outside catalyst. Mark them not relevant unless the market question itself contains a fundamental catalyst.
 
