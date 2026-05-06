@@ -1,25 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-
-// Simple markdown formatter since we cannot install react-markdown
-function formatMarkdown(text: string) {
-  // Replace headers
-  let html = text.replace(/^### (.*$)/gim, '<h3 class="text-xl font-semibold text-white mt-6 mb-3">$1</h3>');
-  html = html.replace(/^## (.*$)/gim, '<h2 class="text-2xl font-bold text-white mt-8 mb-4 border-b border-[#1f2937] pb-2">$1</h2>');
-  html = html.replace(/^# (.*$)/gim, '<h1 class="text-3xl font-bold text-white mt-8 mb-4">$1</h1>');
-  
-  // Replace bold
-  html = html.replace(/\*\*(.*?)\*\*/gim, '<strong class="text-white font-semibold">$1</strong>');
-  
-  // Replace bullets
-  html = html.replace(/^\- (.*$)/gim, '<li class="ml-4 mb-2 list-disc">$1</li>');
-  
-  // Wrap paragraphs (basic)
-  html = html.replace(/\n\n/gim, '</p><p class="mb-4">');
-  
-  return '<p class="mb-4">' + html + '</p>';
-}
+import ReactMarkdown from 'react-markdown';
 
 export default function ReportsPage() {
   interface ReportRow {
@@ -128,8 +110,20 @@ export default function ReportsPage() {
               </div>
             </div>
             
-            <div className="p-8 text-[#9ca3af] leading-relaxed">
-              <div dangerouslySetInnerHTML={{ __html: formatMarkdown(r.content) }} />
+            <div className="p-8 prose prose-invert prose-sm max-w-none
+              prose-headings:text-white prose-headings:font-bold
+              prose-h1:text-3xl prose-h1:mt-8 prose-h1:mb-4
+              prose-h2:text-2xl prose-h2:mt-8 prose-h2:mb-4 prose-h2:border-b prose-h2:border-[#1f2937] prose-h2:pb-2
+              prose-h3:text-xl prose-h3:mt-6 prose-h3:mb-3
+              prose-p:text-[#9ca3af] prose-p:leading-relaxed prose-p:mb-4
+              prose-strong:text-white prose-strong:font-semibold
+              prose-em:text-[#cbd5e1] prose-em:italic
+              prose-li:text-[#9ca3af] prose-li:mb-1
+              prose-ul:my-3 prose-ul:ml-4
+              prose-ol:my-3 prose-ol:ml-4
+              prose-hr:border-[#1f2937] prose-hr:my-6
+              prose-blockquote:border-l-[#3b82f6] prose-blockquote:text-[#9ca3af]">
+              <ReactMarkdown>{r.content}</ReactMarkdown>
             </div>
           </div>
         ))

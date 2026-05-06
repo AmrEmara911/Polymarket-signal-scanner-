@@ -12,11 +12,13 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.3",
+    "@tailwindcss/typography": "^0.5.19",
     "next": "14.2.35",
     "node-cron": "^4.2.1",
     "openai": "^6.36.0",
     "react": "^18",
-    "react-dom": "^18"
+    "react-dom": "^18",
+    "react-markdown": "^10.1.0"
   },
   "devDependencies": {
     "@types/node": "^20",
