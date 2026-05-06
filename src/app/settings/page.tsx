@@ -13,6 +13,32 @@ const SECTORS_LIST = [
   "Macro & Rates"
 ];
 
+type Sensitivity = 'strict' | 'balanced' | 'broad';
+
+const SENSITIVITY_OPTIONS: { value: Sensitivity; label: string; description: string; expected: string }[] = [
+  {
+    value: 'strict',
+    label: 'Strict',
+    description: 'Only direct company events for confirmed BIT Capital holdings. High conviction only.',
+    expected: '5–15 signals per scan',
+  },
+  {
+    value: 'balanced',
+    label: 'Balanced',
+    description: 'Company events + macro signals + regulatory events affecting portfolio sectors.',
+    expected: '15–30 signals per scan',
+  },
+  {
+    value: 'broad',
+    label: 'Broad',
+    description: 'Everything that could plausibly affect tech equities. Includes adjacent sectors and speculative connections.',
+    expected: '30–60 signals per scan',
+  },
+];
+
+const SENSITIVITY_INDEX: Record<Sensitivity, number> = { strict: 0, balanced: 1, broad: 2 };
+const INDEX_SENSITIVITY: Sensitivity[] = ['strict', 'balanced', 'broad'];
+
 const INTERVAL_OPTIONS = [
   { value: 1,  label: 'Every 1 hour' },
   { value: 3,  label: 'Every 3 hours' },
@@ -43,6 +69,8 @@ export default function SettingsPage() {
   const [sectors, setSectors] = useState<Record<string, boolean>>(
     SECTORS_LIST.reduce((acc, curr) => ({ ...acc, [curr]: true }), {})
   );
+  const [sensitivity, setSensitivity] = useState<Sensitivity>('balanced');
+  const [sensitivitySaved, setSensitivitySaved] = useState(false);
   const [saved, setSaved] = useState(false);
 
   // Scheduler state
@@ -55,6 +83,11 @@ export default function SettingsPage() {
   useEffect(() => {
     const savedStocks = localStorage.getItem('bitcap_watched_stocks');
     if (savedStocks) setStocks(savedStocks);
+
+    const savedSensitivity = localStorage.getItem('filter_sensitivity') as Sensitivity | null;
+    if (savedSensitivity && INDEX_SENSITIVITY.includes(savedSensitivity)) {
+      setSensitivity(savedSensitivity);
+    }
 
     const savedSectorsStr = localStorage.getItem('bitcap_watched_sectors');
     if (savedSectorsStr) {
@@ -85,6 +118,13 @@ export default function SettingsPage() {
 
   const toggleSector = (sector: string) => {
     setSectors(prev => ({ ...prev, [sector]: !prev[sector] }));
+  };
+
+  const handleSensitivitySave = (value: Sensitivity) => {
+    setSensitivity(value);
+    localStorage.setItem('filter_sensitivity', value);
+    setSensitivitySaved(true);
+    setTimeout(() => setSensitivitySaved(false), 2000);
   };
 
   const handleSave = () => {
@@ -187,7 +227,80 @@ export default function SettingsPage() {
         )}
       </div>
 
-      {/* Section 3 — Pipeline Schedule */}
+      {/* Section 3 — Filter Sensitivity */}
+      <div className="bg-[#111827] border border-[#1f2937] rounded-xl shadow-sm p-6 space-y-6">
+        <div>
+          <h3 className="text-lg font-semibold text-white mb-1">Filter Sensitivity</h3>
+          <p className="text-sm text-[#9ca3af]">Controls how aggressively the LLM filters prediction markets. Applied on the next pipeline run.</p>
+        </div>
+
+        {/* Slider */}
+        <div className="space-y-4">
+          <div className="relative pt-1">
+            {/* Track labels */}
+            <div className="flex justify-between mb-3">
+              {SENSITIVITY_OPTIONS.map((opt, i) => (
+                <button
+                  key={opt.value}
+                  onClick={() => handleSensitivitySave(opt.value)}
+                  className={`text-sm font-semibold transition-colors ${
+                    sensitivity === opt.value ? 'text-[#3b82f6]' : 'text-[#6b7280] hover:text-[#9ca3af]'
+                  }`}
+                  style={{ width: '33%', textAlign: i === 0 ? 'left' : i === 2 ? 'right' : 'center' }}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Range input */}
+            <div className="relative">
+              <input
+                type="range"
+                min={0}
+                max={2}
+                step={1}
+                value={SENSITIVITY_INDEX[sensitivity]}
+                onChange={(e) => handleSensitivitySave(INDEX_SENSITIVITY[Number(e.target.value)])}
+                className="w-full h-2 rounded-full appearance-none cursor-pointer"
+                style={{
+                  background: `linear-gradient(to right, #3b82f6 0%, #3b82f6 ${SENSITIVITY_INDEX[sensitivity] * 50}%, #1f2937 ${SENSITIVITY_INDEX[sensitivity] * 50}%, #1f2937 100%)`,
+                  accentColor: '#3b82f6',
+                }}
+              />
+              {/* Tick marks */}
+              <div className="flex justify-between px-0.5 mt-1">
+                {[0, 1, 2].map((i) => (
+                  <div
+                    key={i}
+                    className={`w-1 h-1 rounded-full ${SENSITIVITY_INDEX[sensitivity] >= i ? 'bg-[#3b82f6]' : 'bg-[#374151]'}`}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Active mode description */}
+          <div className="bg-[#0a0f1e] border border-[#1f2937] rounded-lg p-4 space-y-1">
+            {SENSITIVITY_OPTIONS.filter(opt => opt.value === sensitivity).map(opt => (
+              <div key={opt.value}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-sm font-semibold text-white">{opt.label} mode</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-[#3b82f6]/20 text-[#3b82f6] font-medium">
+                    {opt.expected}
+                  </span>
+                  {sensitivitySaved && (
+                    <span className="text-xs text-[#10b981] font-medium ml-auto">✓ Saved</span>
+                  )}
+                </div>
+                <p className="text-sm text-[#9ca3af]">{opt.description}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Section 4 — Pipeline Schedule */}
       <div className="bg-[#111827] border border-[#1f2937] rounded-xl shadow-sm p-6 space-y-6">
         <div>
           <h3 className="text-lg font-semibold text-white mb-1">Pipeline Schedule</h3>

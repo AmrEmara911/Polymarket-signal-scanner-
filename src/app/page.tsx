@@ -27,7 +27,8 @@ async function runPipeline(onStep: (status: PipelineStatus, msg: string) => void
   if (!ingestData.success) throw new Error(ingestData.error ?? 'Ingest failed');
 
   onStep('analyzing', `Step 2/3 — Analyzing ${ingestData.count} markets with LLM...`);
-  const analyzeRes = await fetch('/api/analyze', { method: 'POST' });
+  const sensitivity = (typeof window !== 'undefined' ? localStorage.getItem('filter_sensitivity') : null) ?? 'balanced';
+  const analyzeRes = await fetch(`/api/analyze?sensitivity=${sensitivity}`, { method: 'POST' });
   const analyzeData = await analyzeRes.json();
   if (!analyzeData.success) throw new Error(analyzeData.error ?? 'Analyze failed');
 

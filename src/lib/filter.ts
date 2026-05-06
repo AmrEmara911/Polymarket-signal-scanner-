@@ -6,6 +6,37 @@ import { getSupabaseClient } from './supabase';
 
 const BATCH_SIZE = 12;
 
+export type Sensitivity = 'strict' | 'balanced' | 'broad';
+
+const SENSITIVITY_PROMPTS: Record<Sensitivity, string> = {
+  strict: `
+---
+SENSITIVITY MODE: STRICT — expected output: 5–15 relevant signals per 100 markets.
+Raise your bar significantly. Mark is_relevant: true ONLY for:
+- Markets that directly name a BIT Capital holding by ticker: IREN, MSFT, GOOGL, META, NVDA, SOFI, RDDT, HIMS, LMND, HNGE, CRCL, APLD, COHR, GLXY, NTSK
+- Fed rate decisions and central bank policy shifts that directly reprice growth equities
+- Confirmed (not speculative) regulatory actions against a held company
+
+Everything else: is_relevant: false. When in doubt, reject. High conviction only.`,
+
+  balanced: `
+---
+SENSITIVITY MODE: BALANCED — expected output: 15–30 relevant signals per 100 markets.
+This is the default mode. Follow the ALWAYS RELEVANT and REJECT lists above exactly.`,
+
+  broad: `
+---
+SENSITIVITY MODE: BROAD — expected output: 30–60 relevant signals per 100 markets.
+Cast a wide net. Mark is_relevant: true for anything that could plausibly affect tech equities, including:
+- Adjacent sectors: digital advertising, healthcare IT, data-center energy policy, logistics tech
+- Competitor events that could shift dynamics for holdings (rival IPO, competitor regulatory setback)
+- Macro events with a multi-step path to tech equity valuations
+- Geopolitical events with indirect semiconductor or supply-chain implications
+- Speculative connections: if you can draw a 2-step chain from the event to a portfolio holding, include it
+
+When in doubt, include the signal. Flag uncertainty in the reason field.`,
+};
+
 interface MarketForAnalysis {
   id: string;
   question: string;
@@ -382,7 +413,7 @@ export async function getAnalysisCandidates(limit = 20) {
   return fetchUnanalyzedMarkets(limit);
 }
 
-async function analyzeBatch(markets: MarketForAnalysis[]) {
+async function analyzeBatch(markets: MarketForAnalysis[], sensitivity: Sensitivity = 'balanced') {
   const config = await getAnalystConfig();
   const enriched = await enrichWithProbabilityChanges(markets);
   const marketById = new Map(enriched.map((market) => [market.id, market]));
@@ -459,17 +490,19 @@ Return JSON only with this shape:
   ]
 }`;
 
+  const fullSystemPrompt = systemPrompt + SENSITIVITY_PROMPTS[sensitivity];
+
   // Safety check: verify the prompt was loaded with the updated content
-  if (!systemPrompt.includes('IREN')) {
+  if (!fullSystemPrompt.includes('IREN')) {
     throw new Error('[Filter] System prompt not updated correctly — IREN not found in prompt');
   }
-  console.log('[Filter] System prompt loaded OK, length:', systemPrompt.length);
+  console.log('[Filter] System prompt loaded OK | sensitivity:', sensitivity, '| length:', fullSystemPrompt.length);
   console.log('[Filter] Batch size:', markets.length, '| Sample market:', markets[0]?.question);
 
   const response = await callOpenAIJson<OpenAISignalResponse>([
     {
       role: 'system',
-      content: systemPrompt,
+      content: fullSystemPrompt,
     },
     {
       role: 'user',
@@ -493,9 +526,9 @@ Return exactly one signal object for each market. Use relevance_score >= 0.65 on
     .filter((signal): signal is RawSignal => signal !== null);
 }
 
-export async function analyzeMarkets(limit = 36): Promise<AnalyzeResult> {
+export async function analyzeMarkets(limit = 36, sensitivity: Sensitivity = 'balanced'): Promise<AnalyzeResult> {
   const supabase = getSupabaseClient();
-  console.log('[Filter] analyzeMarkets starting, model:', getOpenAIModel(), '| limit:', limit);
+  console.log('[Filter] analyzeMarkets starting, model:', getOpenAIModel(), '| limit:', limit, '| sensitivity:', sensitivity);
   const markets = await getAnalysisCandidates(limit);
   console.log('[Filter] Candidates to analyze:', markets.length, '| Sample:', markets[0]?.question ?? 'none');
   if (!markets.length) {
@@ -508,7 +541,7 @@ export async function analyzeMarkets(limit = 36): Promise<AnalyzeResult> {
 
   for (let index = 0; index < markets.length; index += BATCH_SIZE) {
     const batch = markets.slice(index, index + BATCH_SIZE);
-    const signals = await analyzeBatch(batch);
+    const signals = await analyzeBatch(batch, sensitivity);
     const rows = signals.map((signal) => ({
       ...signal,
       model: getOpenAIModel(),
