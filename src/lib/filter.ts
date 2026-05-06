@@ -405,10 +405,7 @@ async function analyzeBatch(markets: MarketForAnalysis[]) {
     deterministic_noise_flags: market.candidate_noise,
   }));
 
-  const response = await callOpenAIJson<OpenAISignalResponse>([
-    {
-      role: 'system',
-      content: `You are a senior investment analyst at BIT Capital GmbH, a Berlin-based asset manager with $2.7B AUM as of 2025. You are building a Polymarket signal scanner to surface early-warning signals for the portfolio before consensus forms.
+  const systemPrompt = `You are a senior investment analyst at BIT Capital GmbH, a Berlin-based asset manager with $2.7B AUM as of 2025. You are building a Polymarket signal scanner to surface early-warning signals for the portfolio before consensus forms.
 
 ${BITCAP_RESEARCH_CONTEXT}
 
@@ -460,7 +457,19 @@ Return JSON only with this shape:
       "suggested_action": "what an analyst should check next"
     }
   ]
-}`,
+}`;
+
+  // Safety check: verify the prompt was loaded with the updated content
+  if (!systemPrompt.includes('IREN')) {
+    throw new Error('[Filter] System prompt not updated correctly — IREN not found in prompt');
+  }
+  console.log('[Filter] System prompt loaded OK, length:', systemPrompt.length);
+  console.log('[Filter] Batch size:', markets.length, '| Sample market:', markets[0]?.question);
+
+  const response = await callOpenAIJson<OpenAISignalResponse>([
+    {
+      role: 'system',
+      content: systemPrompt,
     },
     {
       role: 'user',
@@ -476,6 +485,9 @@ Return exactly one signal object for each market. Use relevance_score >= 0.65 on
     },
   ]);
 
+  const relevantCount = response.signals?.filter((s) => s.is_relevant).length ?? 0;
+  console.log('[Filter] LLM returned:', response.signals?.length ?? 0, 'signals,', relevantCount, 'relevant | Sample:', JSON.stringify(response.signals?.[0]).slice(0, 150));
+
   return response.signals
     .map((signal) => normalizeSignal(signal, marketById))
     .filter((signal): signal is RawSignal => signal !== null);
@@ -483,8 +495,13 @@ Return exactly one signal object for each market. Use relevance_score >= 0.65 on
 
 export async function analyzeMarkets(limit = 36): Promise<AnalyzeResult> {
   const supabase = getSupabaseClient();
+  console.log('[Filter] analyzeMarkets starting, model:', getOpenAIModel(), '| limit:', limit);
   const markets = await getAnalysisCandidates(limit);
-  if (!markets.length) return { analyzed: 0, relevant: 0 };
+  console.log('[Filter] Candidates to analyze:', markets.length, '| Sample:', markets[0]?.question ?? 'none');
+  if (!markets.length) {
+    console.log('[Filter] No unanalyzed markets found — all markets may already have signal rows. Run ingest first or clear old signals.');
+    return { analyzed: 0, relevant: 0 };
+  }
 
   let totalAnalyzed = 0;
   let totalRelevant = 0;

@@ -85,12 +85,12 @@ export default function Dashboard() {
         lastUpdated: latestSignal?.[0]?.analyzed_at ? new Date(latestSignal[0].analyzed_at).toLocaleString() : 'Never'
       });
 
-      // Fetch Top Signals
+      // Fetch Top Signals — most recent relevant signals regardless of date
       const { data: top } = await supabase
         .from('signals')
-        .select('id, markets(question, probability, volume), probability_change, affected_stocks, urgency, signal_type')
+        .select('*, markets(question, probability, volume)')
         .eq('is_relevant', true)
-        .order('confidence', { ascending: false })
+        .order('analyzed_at', { ascending: false })
         .limit(5);
 
       if (top) setTopSignals(top as unknown as SignalRow[]);
