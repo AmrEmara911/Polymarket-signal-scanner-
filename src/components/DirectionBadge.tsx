@@ -47,28 +47,32 @@ interface DirectionBadgeProps {
 export function DirectionBadge({ direction, variant = 'pill' }: DirectionBadgeProps) {
   const state = parseDirection(direction);
 
+  // Institutional analyst language (Goldman/BlackRock/JPM morning-note style):
+  // Positive / Negative / Neutral — not the trader slang Bullish / Bearish.
+  // Normal capitalization with `font-medium` (not all-caps + bold) to read
+  // like an analyst rating.
   const baseClass = variant === 'pill'
-    ? 'px-2.5 py-1 rounded-full text-xs font-semibold inline-block'
-    : 'text-xs font-semibold';
+    ? 'px-2.5 py-1 rounded-full text-xs font-medium inline-block'
+    : 'text-xs font-medium';
 
   if (state === 'bullish') {
     return (
       <span className={`${baseClass} ${variant === 'pill' ? 'bg-[#10b981]/20 text-[#10b981]' : 'text-[#10b981]'}`}>
-        ↑ BULLISH
+        ↑ Positive
       </span>
     );
   }
   if (state === 'bearish') {
     return (
       <span className={`${baseClass} ${variant === 'pill' ? 'bg-[#ef4444]/20 text-[#ef4444]' : 'text-[#ef4444]'}`}>
-        ↓ BEARISH
+        ↓ Negative
       </span>
     );
   }
   if (state === 'neutral') {
     return (
       <span className={`${baseClass} ${variant === 'pill' ? 'bg-[#374151] text-gray-300' : 'text-gray-300'}`}>
-        ◆ NEUTRAL
+        Neutral
       </span>
     );
   }
