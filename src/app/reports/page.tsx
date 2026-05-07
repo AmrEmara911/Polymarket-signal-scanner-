@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { supabase } from '@/lib/supabase';
 import { resolveMarketUrl } from '@/components/MarketLink';
+import { formatRelativeTime, formatFullTimestamp } from '@/lib/format-time';
 
 interface MarketRef {
   id: string;
@@ -113,17 +114,36 @@ export default function ReportsPage() {
 
       {reports.length === 0 ? (
         <div className="bg-[#111827] border border-[#1f2937] p-12 text-center rounded-xl shadow-sm">
-          <p className="text-[#9ca3af] text-lg">No reports generated yet.</p>
-          <p className="text-[#9ca3af] mt-2">Click &ldquo;Generate New Report&rdquo; above to create your first briefing.</p>
+          <p className="text-[#9ca3af] text-lg mb-2">No reports generated yet.</p>
+          <p className="text-[#6b7280] text-sm max-w-md mx-auto mb-6">
+            Reports synthesize the day&rsquo;s most important signals into a morning briefing.
+          </p>
+          <button
+            onClick={generateReport}
+            disabled={generating}
+            className="inline-flex items-center gap-2 bg-[#3b82f6] hover:bg-[#2563eb] disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-3 rounded-lg text-sm font-semibold transition-colors"
+          >
+            {generating ? (
+              <>
+                <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                Generating…
+              </>
+            ) : (
+              <>▶ Generate Your First Report</>
+            )}
+          </button>
         </div>
       ) : (
         reports.map(r => (
           <div key={r.id} className="bg-[#111827] border border-[#1f2937] rounded-xl shadow-sm overflow-hidden">
             <div className="bg-[#0a0f1e] px-6 py-4 border-b border-[#1f2937] flex justify-between items-center">
               <div>
-                <span className="text-[#9ca3af] text-sm font-medium">Generated at: </span>
-                <span className="text-white font-medium">
-                  {new Date(r.generated_at).toLocaleString('en-US', { month: 'long', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                <span className="text-[#9ca3af] text-sm font-medium">Generated </span>
+                <span
+                  className="text-white font-medium cursor-help"
+                  title={formatFullTimestamp(r.generated_at)}
+                >
+                  {formatRelativeTime(r.generated_at)}
                 </span>
               </div>
               <div className="flex items-center gap-4">

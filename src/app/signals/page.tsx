@@ -6,6 +6,7 @@ import { DirectionBadge } from '@/components/DirectionBadge';
 import { ProbChangeBadge } from '@/components/ProbChangeBadge';
 import { MarketLinkIcon, MarketLinkButton, resolveMarketUrl } from '@/components/MarketLink';
 import { Sparkline } from '@/components/Sparkline';
+import { formatRelativeTime, formatFullTimestamp } from '@/lib/format-time';
 
 /**
  * Format a USD volume figure as a compact human-readable string.
@@ -195,6 +196,13 @@ export default function SignalsPage() {
       <div className="bg-[#111827] border border-[#1f2937] rounded-xl shadow-sm overflow-hidden">
         {loading ? (
           <div className="p-10 text-center text-[#9ca3af] animate-pulse">Loading signals...</div>
+        ) : filteredSignals.length === 0 ? (
+          <div className="text-center py-16">
+            <p className="text-[#9ca3af] mb-2">No signals match your filters</p>
+            <p className="text-[#6b7280] text-sm">
+              Try changing the urgency, type, or movement filters above
+            </p>
+          </div>
         ) : (
           <table className="w-full text-left text-sm text-[#9ca3af]">
             <thead className="bg-[#0a0f1e] text-[#9ca3af] uppercase font-semibold text-xs border-b border-[#1f2937]">
@@ -224,7 +232,7 @@ export default function SignalsPage() {
                   <React.Fragment key={s.id}>
                     <tr
                       onClick={() => setExpandedId(isExpanded ? null : s.id)}
-                      className="hover:bg-[#1f2937]/50 transition-colors cursor-pointer"
+                      className="transition-colors duration-150 hover:bg-slate-800/70 cursor-pointer"
                     >
                       <td className="px-6 py-4">
                         <div className="max-w-[360px]">
@@ -332,7 +340,12 @@ export default function SignalsPage() {
                               <ul className="space-y-2 text-gray-400">
                                 <li><strong className="text-gray-300">Signal Direction:</strong> {s.signal_direction || 'N/A'}</li>
                                 <li><strong className="text-gray-300">Volume:</strong> ${(m?.volume || 0).toLocaleString()}</li>
-                                <li><strong className="text-gray-300">Analyzed At:</strong> {new Date(s.analyzed_at).toLocaleString()}</li>
+                                <li>
+                                  <strong className="text-gray-300">Analyzed:</strong>{' '}
+                                  <span title={formatFullTimestamp(s.analyzed_at)} className="cursor-help">
+                                    {formatRelativeTime(s.analyzed_at)}
+                                  </span>
+                                </li>
                                 <li><strong className="text-gray-300">All Stocks:</strong> {s.affected_stocks?.join(', ') || 'None'}</li>
                               </ul>
                             </div>

@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabase';
 import { DirectionBadge } from '@/components/DirectionBadge';
 import { ProbChangeBadge } from '@/components/ProbChangeBadge';
 import { MarketLinkIcon, resolveMarketUrl } from '@/components/MarketLink';
+import { formatRelativeTime, formatFullTimestamp } from '@/lib/format-time';
 
 type PipelineStatus = 'idle' | 'ingesting' | 'analyzing' | 'reporting' | 'done' | 'error';
 
@@ -87,13 +88,28 @@ async function runPipeline(onStep: (status: PipelineStatus, msg: string) => void
 }
 
 export default function Dashboard() {
-  const [metrics, setMetrics] = useState({
+  const [metrics, setMetrics] = useState<{
+    totalScanned: number;
+    relevantFound: number;
+    highUrgency: number;
+    marketsMoving: number;
+    /** ISO string of the most recent signal, or null. Formatted on render so
+     *  the relative time stays fresh as the page sits open. */
+    lastUpdatedAt: string | null;
+  }>({
     totalScanned: 0,
     relevantFound: 0,
     highUrgency: 0,
     marketsMoving: 0,
-    lastUpdated: '-'
+    lastUpdatedAt: null,
   });
+  // Tick state: bumped every 30s so any formatRelativeTime() call below
+  // re-renders with fresh "Xm ago" output without re-fetching data.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 30_000);
+    return () => clearInterval(id);
+  }, []);
   const [topSignals, setTopSignals] = useState<SignalRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>('idle');
@@ -143,7 +159,7 @@ export default function Dashboard() {
         relevantFound: relevantFound || 0,
         highUrgency: highUrgency || 0,
         marketsMoving: movingCount,
-        lastUpdated: latestSignal?.[0]?.analyzed_at ? new Date(latestSignal[0].analyzed_at).toLocaleString() : 'Never'
+        lastUpdatedAt: latestSignal?.[0]?.analyzed_at ?? null,
       });
 
       // Fetch Top Signals — get relevant signals and sort by significance score
@@ -232,22 +248,105 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {metrics.totalScanned === 0 ? (
+        // First-run empty state — no markets ingested yet
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <div className="w-16 h-16 rounded-full bg-[#3b82f6]/10 flex items-center justify-center mb-4">
+            {/* Lucide `radio` glyph — radar/scan vibe */}
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="32"
+              height="32"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="#3b82f6"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9" />
+              <path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5" />
+              <circle cx="12" cy="12" r="2" />
+              <path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5" />
+              <path d="M19.1 4.9C23 8.8 23 15.1 19.1 19" />
+            </svg>
+          </div>
+          <h2 className="text-xl font-semibold text-white mb-2">
+            Welcome to BIT Capital Signal Scanner
+          </h2>
+          <p className="text-[#9ca3af] max-w-md mb-6">
+            Run your first pipeline to scan Polymarket prediction markets and identify
+            equity-relevant signals for the BIT Capital portfolio.
+          </p>
+          <button
+            onClick={handleRunPipeline}
+            disabled={['ingesting', 'analyzing', 'reporting'].includes(pipelineStatus)}
+            className="bg-[#3b82f6] hover:bg-[#2563eb] disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-3 rounded-lg font-medium transition-colors"
+          >
+            {['ingesting', 'analyzing', 'reporting'].includes(pipelineStatus)
+              ? 'Running…'
+              : '▶ Run Your First Pipeline'}
+          </button>
+          <p className="text-[#6b7280] text-sm mt-4">
+            Takes about 30 seconds. Will fetch ~100 markets and analyze them with the LLM.
+          </p>
+        </div>
+      ) : (
+        <>
       {/* Metrics Row */}
       <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-        {[
-          { label: 'Total Markets Scanned', value: metrics.totalScanned },
-          { label: 'Relevant Signals Found', value: metrics.relevantFound, color: 'text-[#10b981]' },
-          { label: 'High Urgency Signals', value: metrics.highUrgency, color: 'text-[#ef4444]' },
-          { label: 'Markets Moving Today', value: metrics.marketsMoving, color: 'text-[#f59e0b]' },
-          { label: 'Last Updated', value: metrics.lastUpdated, small: true }
-        ].map((metric, idx) => (
-          <div key={idx} className="bg-[#111827] border border-[#1f2937] p-5 rounded-xl shadow-sm">
-            <h3 className="text-sm font-medium text-[#9ca3af] mb-1">{metric.label}</h3>
-            <p className={`font-bold ${metric.small ? 'text-lg text-white' : 'text-3xl'} ${metric.color || 'text-white'}`}>
-              {metric.value}
+        {/* 1. Total Markets Scanned */}
+        <div className="bg-[#111827] border border-[#1f2937] p-5 rounded-xl shadow-sm">
+          <h3 className="text-sm font-medium text-[#9ca3af] mb-1">Total Markets Scanned</h3>
+          <p className="font-bold text-3xl text-white">{metrics.totalScanned}</p>
+        </div>
+        {/* 2. Relevant Signals Found */}
+        <div className="bg-[#111827] border border-[#1f2937] p-5 rounded-xl shadow-sm">
+          <h3 className="text-sm font-medium text-[#9ca3af] mb-1">Relevant Signals Found</h3>
+          <p className="font-bold text-3xl text-[#10b981]">{metrics.relevantFound}</p>
+        </div>
+        {/* 3. High Urgency Signals */}
+        <div className="bg-[#111827] border border-[#1f2937] p-5 rounded-xl shadow-sm">
+          <h3 className="text-sm font-medium text-[#9ca3af] mb-1">High Urgency Signals</h3>
+          <p className="font-bold text-3xl text-[#ef4444]">{metrics.highUrgency}</p>
+        </div>
+        {/* 4. Markets Moving Today — special handling for the no-data-yet case */}
+        <div className="bg-[#111827] border border-[#1f2937] p-5 rounded-xl shadow-sm">
+          <h3 className="text-sm font-medium text-[#9ca3af] mb-1 flex items-center gap-1.5">
+            Markets Moving Today
+            <span
+              title="Markets where probability has changed by more than 10 percentage points in the last 24 hours."
+              className="cursor-help text-[#6b7280] hover:text-[#9ca3af] transition-colors"
+              aria-label="What counts as a moving market?"
+            >
+              {/* lucide `info` */}
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+            </span>
+          </h3>
+          {metrics.marketsMoving > 0 ? (
+            <p className="font-bold text-3xl text-[#f59e0b]">{metrics.marketsMoving}</p>
+          ) : (
+            <>
+              <p className="font-bold text-3xl text-[#6b7280]">—</p>
+              <p className="text-xs text-[#6b7280] mt-1">Tracking begins after 2nd run</p>
+            </>
+          )}
+        </div>
+        {/* 5. Last Updated — relative time, full timestamp on hover, auto-refreshes every 30s */}
+        <div className="bg-[#111827] border border-[#1f2937] p-5 rounded-xl shadow-sm">
+          <h3 className="text-sm font-medium text-[#9ca3af] mb-1">Last Updated</h3>
+          {metrics.lastUpdatedAt ? (
+            <p
+              className="font-bold text-lg text-white"
+              title={formatFullTimestamp(metrics.lastUpdatedAt)}
+            >
+              {formatRelativeTime(metrics.lastUpdatedAt)}
             </p>
-          </div>
-        ))}
+          ) : (
+            <p className="font-bold text-lg text-[#6b7280]">Never</p>
+          )}
+        </div>
       </div>
 
       {/* Top Signals Table */}
@@ -281,7 +380,7 @@ export default function Dashboard() {
                   const marketUrl = resolveMarketUrl(m);
 
                   return (
-                    <tr key={s.id} className="hover:bg-[#1f2937]/50 transition-colors">
+                    <tr key={s.id} className="transition-colors duration-150 hover:bg-slate-800/50">
                       <td className="px-6 py-4 max-w-md">
                         <div className="flex items-center gap-2">
                           <span className="font-medium text-white truncate" title={m?.question}>{m?.question}</span>
@@ -337,6 +436,8 @@ export default function Dashboard() {
           </table>
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 }
