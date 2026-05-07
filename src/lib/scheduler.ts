@@ -27,18 +27,21 @@ async function runPipeline() {
   const base = getBaseUrl();
 
   try {
-    const ingestRes = await fetch(`${base}/api/ingest`);
+    // All three routes accept POST; use it consistently to avoid 405s on
+    // routes that may not export GET.
+    const ingestRes = await fetch(`${base}/api/ingest`, { method: 'POST' });
     const ingestData = await ingestRes.json();
     console.log('[Scheduler] Ingested:', ingestData.count, 'markets');
 
-    const analyzeRes = await fetch(`${base}/api/analyze`);
+    const analyzeRes = await fetch(`${base}/api/analyze`, { method: 'POST' });
     const analyzeData = await analyzeRes.json();
     console.log('[Scheduler] Analyzed:', analyzeData.analyzed, 'markets,', analyzeData.relevant, 'relevant');
 
     if (analyzeData.relevant > 0) {
-      const reportRes = await fetch(`${base}/api/report`);
+      // /api/report only exports POST — using GET here was silently 405-ing
+      const reportRes = await fetch(`${base}/api/report`, { method: 'POST' });
       const reportData = await reportRes.json();
-      console.log('[Scheduler] Report generated:', reportData.id);
+      console.log('[Scheduler] Report generated:', reportData.report?.id ?? '(no id)');
     }
   } catch (error) {
     console.error('[Scheduler] Pipeline error:', error);

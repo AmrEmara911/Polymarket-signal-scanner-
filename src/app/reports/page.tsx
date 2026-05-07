@@ -84,7 +84,7 @@ export default function ReportsPage() {
       {reports.length === 0 ? (
         <div className="bg-[#111827] border border-[#1f2937] p-12 text-center rounded-xl shadow-sm">
           <p className="text-[#9ca3af] text-lg">No reports generated yet.</p>
-          <p className="text-[#9ca3af] mt-2">Hit /api/report to generate your first report.</p>
+          <p className="text-[#9ca3af] mt-2">Click &ldquo;Generate New Report&rdquo; above to create your first briefing.</p>
         </div>
       ) : (
         reports.map(r => (

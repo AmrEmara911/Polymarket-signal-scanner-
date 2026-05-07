@@ -125,15 +125,6 @@ function isAnnualProductCycleMarket(question: string): boolean {
   return hasReleaseVerb && hasAnnualProduct && hasYear;
 }
 
-function isProductOrEarningsMarket(question: string): boolean {
-  const text = question.toLowerCase();
-  return (
-    /\b(release|launch|ship|announce|unveil)\b/.test(text) ||
-    /\b(earnings|revenue|eps|quarterly (results|earnings)|q[1-4] (earnings|results|revenue))\b/.test(text) ||
-    /\b(beat|miss|exceed).*(earnings|estimates|expectations|consensus)\b/.test(text)
-  );
-}
-
 function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSignal {
   // Rule 1: direct equity price targets are never useful signals
   if (isDirectEquityPriceMarket(market.question)) {
@@ -527,7 +518,6 @@ Return exactly one signal object for each market. Use relevance_score >= 0.65 on
 }
 
 export async function analyzeMarkets(limit = 36, sensitivity: Sensitivity = 'balanced'): Promise<AnalyzeResult> {
-  const supabase = getSupabaseClient();
   console.log('[Filter] analyzeMarkets starting, model:', getOpenAIModel(), '| limit:', limit, '| sensitivity:', sensitivity);
   const markets = await getAnalysisCandidates(limit);
   console.log('[Filter] Candidates to analyze:', markets.length, '| Sample:', markets[0]?.question ?? 'none');
