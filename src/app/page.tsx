@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
+import { DirectionBadge } from '@/components/DirectionBadge';
+import { ProbChangeBadge } from '@/components/ProbChangeBadge';
 
 type PipelineStatus = 'idle' | 'ingesting' | 'analyzing' | 'reporting' | 'done' | 'error';
 
@@ -21,6 +23,17 @@ type SignalRow = {
   signal_direction: string | null;
   confidence: number | null;
 };
+
+/**
+ * Format a USD volume figure as a compact human-readable string.
+ * Examples: 2_300_000 → "$2.3M", 50_000 → "$50K", 800 → "$800".
+ * Used to signal market credibility (thin markets = noise).
+ */
+function formatVolume(volume: number): string {
+  if (volume >= 1_000_000) return `$${(volume / 1_000_000).toFixed(1)}M`;
+  if (volume >= 1_000) return `$${(volume / 1_000).toFixed(0)}K`;
+  return `$${volume.toFixed(0)}`;
+}
 
 function calculateSignificance(signal: SignalRow): number {
   // Urgency weight (high=3, medium=2, low=1)
@@ -105,18 +118,19 @@ export default function Dashboard() {
       const { count: relevantFound } = await supabase.from('signals').select('*', { count: 'exact', head: true }).eq('is_relevant', true);
       const { count: highUrgency } = await supabase.from('signals').select('*', { count: 'exact', head: true }).eq('urgency', 'high');
 
-      // Count markets moving significantly (>10pp change)
-      const { data: movingSignalsUp } = await supabase
+      // Count markets moving significantly (>10pp change in either direction).
+      // NOTE: with `head: true` the response `data` is null — we MUST use `count`.
+      const { count: movingUpCount } = await supabase
         .from('signals')
-        .select('id', { count: 'exact', head: true })
+        .select('*', { count: 'exact', head: true })
         .eq('is_relevant', true)
         .gt('probability_change', 0.10);
-      const { data: movingSignalsDown } = await supabase
+      const { count: movingDownCount } = await supabase
         .from('signals')
-        .select('id', { count: 'exact', head: true })
+        .select('*', { count: 'exact', head: true })
         .eq('is_relevant', true)
         .lt('probability_change', -0.10);
-      const movingCount = (movingSignalsUp?.length || 0) + (movingSignalsDown?.length || 0);
+      const movingCount = (movingUpCount ?? 0) + (movingDownCount ?? 0);
 
       const { data: latestSignal } = await supabase.from('signals').select('analyzed_at').order('analyzed_at', { ascending: false }).limit(1);
 
@@ -259,24 +273,7 @@ export default function Dashboard() {
                   const m = Array.isArray(s.markets) ? s.markets[0] : s.markets;
                   const prob = (m?.probability || 0) * 100;
                   const volume = m?.volume || 0;
-                  const volumeLabel = volume >= 1_000_000
-                    ? `$${(volume / 1_000_000).toFixed(1)}M`
-                    : volume >= 1_000
-                    ? `$${(volume / 1_000).toFixed(0)}K`
-                    : `$${volume.toFixed(0)}`;
-
-                  // Determine direction badge
-                  const getDirectionBadge = () => {
-                    if (!s.signal_direction) return <span className="text-gray-400">◆ UNCLEAR</span>;
-                    const lower = s.signal_direction.toLowerCase();
-                    if (lower.includes('bullish') || lower.includes('positive') || lower.includes('up')) {
-                      return <span className="text-[#10b981] font-semibold">↑ BULLISH</span>;
-                    }
-                    if (lower.includes('bearish') || lower.includes('negative') || lower.includes('down')) {
-                      return <span className="text-[#ef4444] font-semibold">↓ BEARISH</span>;
-                    }
-                    return <span className="text-gray-400">◆ NEUTRAL</span>;
-                  };
+                  const volumeLabel = formatVolume(volume);
 
                   return (
                     <tr key={s.id} className="hover:bg-[#1f2937]/50 transition-colors">
@@ -289,15 +286,7 @@ export default function Dashboard() {
                               <div className="h-full bg-[#3b82f6]" style={{ width: `${prob}%` }}></div>
                             </div>
                           </div>
-                          {s.probability_change != null && Math.abs(s.probability_change) >= 0.05 && (
-                            <span className={`text-xs font-semibold px-1.5 py-0.5 rounded w-fit ${
-                              s.probability_change > 0
-                                ? 'bg-[#10b981]/20 text-[#10b981]'
-                                : 'bg-[#ef4444]/20 text-[#ef4444]'
-                            }`}>
-                              {s.probability_change > 0 ? '↑ +' : '↓ '}{(s.probability_change * 100).toFixed(0)}pp
-                            </span>
-                          )}
+                          <ProbChangeBadge change={s.probability_change} />
                         </div>
                       </td>
                       <td className="px-6 py-4">
@@ -316,7 +305,7 @@ export default function Dashboard() {
                         </div>
                       </td>
                       <td className="px-6 py-4">
-                        {getDirectionBadge()}
+                        <DirectionBadge direction={s.signal_direction} />
                       </td>
                       <td className="px-6 py-4">
                         <span className={`px-2.5 py-1 rounded-full text-xs font-semibold capitalize ${

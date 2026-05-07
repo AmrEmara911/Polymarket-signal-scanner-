@@ -2,6 +2,18 @@
 
 import React, { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
+import { DirectionBadge } from '@/components/DirectionBadge';
+import { ProbChangeBadge } from '@/components/ProbChangeBadge';
+
+/**
+ * Format a USD volume figure as a compact human-readable string.
+ * 2_300_000 → "$2.3M", 50_000 → "$50K", 800 → "$800".
+ */
+function formatVolume(volume: number): string {
+  if (volume >= 1_000_000) return `$${(volume / 1_000_000).toFixed(1)}M`;
+  if (volume >= 1_000) return `$${(volume / 1_000).toFixed(0)}K`;
+  return `$${volume.toFixed(0)}`;
+}
 
 type MarketInfo = {
   question: string;
@@ -197,15 +209,7 @@ export default function SignalsPage() {
                           <span className={`font-mono ${prob > 60 ? 'text-[#10b981]' : prob > 40 ? 'text-[#f59e0b]' : 'text-[#ef4444]'}`}>
                             {prob.toFixed(1)}%
                           </span>
-                          {s.probability_change != null && Math.abs(s.probability_change) >= 0.05 && (
-                            <span className={`text-xs font-semibold px-1.5 py-0.5 rounded w-fit ${
-                              s.probability_change > 0
-                                ? 'bg-[#10b981]/20 text-[#10b981]'
-                                : 'bg-[#ef4444]/20 text-[#ef4444]'
-                            }`}>
-                              {s.probability_change > 0 ? '↑ +' : '↓ '}{(s.probability_change * 100).toFixed(0)}pts
-                            </span>
-                          )}
+                          <ProbChangeBadge change={s.probability_change} />
                         </div>
                       </td>
                       <td className="px-4 py-4">
@@ -226,27 +230,22 @@ export default function SignalsPage() {
                         )}
                       </td>
                       <td className="px-4 py-4">
-                        {(() => {
-                          if (!s.signal_direction) return <span className="text-gray-400">—</span>;
-                          const lower = s.signal_direction.toLowerCase();
-                          if (lower.includes('bullish') || lower.includes('positive') || lower.includes('up') || lower.includes('rise') || lower.includes('increase')) {
-                            return <span className="text-[#10b981] font-semibold">↑ BULLISH</span>;
-                          }
-                          if (lower.includes('bearish') || lower.includes('negative') || lower.includes('down') || lower.includes('fall') || lower.includes('decrease')) {
-                            return <span className="text-[#ef4444] font-semibold">↓ BEARISH</span>;
-                          }
-                          return <span className="text-gray-400">◆ NEUTRAL</span>;
-                        })()}
+                        <DirectionBadge direction={s.signal_direction} />
                       </td>
                       <td className="px-6 py-4">
-                        <div className="flex flex-wrap gap-1 max-w-[150px]">
-                          {s.affected_stocks?.slice(0, 3).map((stock) => (
-                            <span key={stock} className="px-2 py-0.5 rounded-full bg-[#3b82f6]/20 text-[#3b82f6] text-xs font-medium">
-                              {stock}
-                            </span>
-                          ))}
-                          {(s.affected_stocks?.length ?? 0) > 3 && (
-                            <span className="px-2 py-0.5 text-xs">+{(s.affected_stocks?.length ?? 0) - 3}</span>
+                        <div className="flex flex-col gap-1.5 max-w-[170px]">
+                          <div className="flex flex-wrap gap-1">
+                            {s.affected_stocks?.slice(0, 3).map((stock) => (
+                              <span key={stock} className="px-2 py-0.5 rounded-full bg-[#3b82f6]/20 text-[#3b82f6] text-xs font-medium">
+                                {stock}
+                              </span>
+                            ))}
+                            {(s.affected_stocks?.length ?? 0) > 3 && (
+                              <span className="px-2 py-0.5 text-xs text-[#9ca3af]">+{(s.affected_stocks?.length ?? 0) - 3}</span>
+                            )}
+                          </div>
+                          {(m?.volume ?? 0) > 0 && (
+                            <span className="text-xs text-[#6b7280]">{formatVolume(m?.volume ?? 0)} volume</span>
                           )}
                         </div>
                       </td>
