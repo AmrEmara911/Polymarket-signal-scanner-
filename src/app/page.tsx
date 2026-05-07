@@ -74,6 +74,7 @@ export default function Dashboard() {
     totalScanned: 0,
     relevantFound: 0,
     highUrgency: 0,
+    marketsMoving: 0,
     lastUpdated: '-'
   });
   const [topSignals, setTopSignals] = useState<SignalRow[]>([]);
@@ -104,12 +105,26 @@ export default function Dashboard() {
       const { count: relevantFound } = await supabase.from('signals').select('*', { count: 'exact', head: true }).eq('is_relevant', true);
       const { count: highUrgency } = await supabase.from('signals').select('*', { count: 'exact', head: true }).eq('urgency', 'high');
 
+      // Count markets moving significantly (>10pp change)
+      const { data: movingSignalsUp } = await supabase
+        .from('signals')
+        .select('id', { count: 'exact', head: true })
+        .eq('is_relevant', true)
+        .gt('probability_change', 0.10);
+      const { data: movingSignalsDown } = await supabase
+        .from('signals')
+        .select('id', { count: 'exact', head: true })
+        .eq('is_relevant', true)
+        .lt('probability_change', -0.10);
+      const movingCount = (movingSignalsUp?.length || 0) + (movingSignalsDown?.length || 0);
+
       const { data: latestSignal } = await supabase.from('signals').select('analyzed_at').order('analyzed_at', { ascending: false }).limit(1);
 
       setMetrics({
         totalScanned: totalScanned || 0,
         relevantFound: relevantFound || 0,
         highUrgency: highUrgency || 0,
+        marketsMoving: movingCount,
         lastUpdated: latestSignal?.[0]?.analyzed_at ? new Date(latestSignal[0].analyzed_at).toLocaleString() : 'Never'
       });
 
@@ -200,11 +215,12 @@ export default function Dashboard() {
       </div>
 
       {/* Metrics Row */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
         {[
           { label: 'Total Markets Scanned', value: metrics.totalScanned },
           { label: 'Relevant Signals Found', value: metrics.relevantFound, color: 'text-[#10b981]' },
           { label: 'High Urgency Signals', value: metrics.highUrgency, color: 'text-[#ef4444]' },
+          { label: 'Markets Moving Today', value: metrics.marketsMoving, color: 'text-[#f59e0b]' },
           { label: 'Last Updated', value: metrics.lastUpdated, small: true }
         ].map((metric, idx) => (
           <div key={idx} className="bg-[#111827] border border-[#1f2937] p-5 rounded-xl shadow-sm">

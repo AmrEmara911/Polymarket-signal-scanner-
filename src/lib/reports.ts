@@ -1,4 +1,3 @@
-import { getAnalystConfig } from './analyst-config';
 import { BITCAP_RESEARCH_CONTEXT } from './bitcap';
 import { callOpenAIJson, getOpenAIModel } from './openai';
 import { getSupabaseClient } from './supabase';
@@ -111,7 +110,7 @@ function getMissingColumn(message: string) {
 
 async function insertReportWithSchemaFallback(row: Record<string, unknown>) {
   const supabase = getSupabaseClient();
-  let mutableRow = { ...row };
+  const mutableRow = { ...row };
   const removedColumns: string[] = [];
 
   for (let attempt = 0; attempt < 10; attempt += 1) {
@@ -139,7 +138,6 @@ async function insertReportWithSchemaFallback(row: Record<string, unknown>) {
 
 export async function generateSignalReport(limit = 12): Promise<GeneratedReport | null> {
   const supabase = getSupabaseClient();
-  const config = await getAnalystConfig();
 
   const { data: signals, error } = await supabase
     .from('signals')
@@ -243,6 +241,8 @@ Return JSON only:
       content: `Write a morning signal briefing for BIT Capital portfolio managers based on these Polymarket prediction markets.
 
 Each signal includes its current probability AND how much it has moved in the last 24 hours. The 24h change is as important as the current level — a market at 60% that was at 45% yesterday is a different animal from one that has been at 60% for a week. Markets tagged ⚡ MOVING have shifted more than 10 percentage points since yesterday; lead with the movement, not just the level. Explain what likely drove the shift.
+
+CRITICAL: Pay special attention to markets that have moved more than 10 percentage points in the last 24 hours. These are the most actionable signals because they indicate the consensus view is shifting in real time. When probability has moved significantly (>10pp), this usually means new information has hit the market, and it merits front-and-center analysis. Always mention probability movement when it exists, not just current probability levels. Movement is your signal.
 
 Active signals:
 ${signalLines}
