@@ -2,20 +2,24 @@ import React from 'react';
 import { buildPolymarketUrl } from '@/lib/polymarket';
 
 /**
- * Resolve the best Polymarket URL for a market: prefer the pre-computed
- * `market_url` from the DB, fall back to building one from slug, then
- * fall back to the id-based URL. This handles old rows that pre-date
- * the `market_url` column.
+ * Resolve the best Polymarket URL for a market.
+ *
+ *  1. Use the pre-computed `market_url` if the row has been re-ingested
+ *     with the corrected event-slug logic.
+ *  2. Otherwise build on the fly from the available DB fields. The frontend
+ *     doesn't have access to the `events[]` array (that lives in `raw`),
+ *     so the on-the-fly build will use the question-search fallback —
+ *     which always works, even if it's a few clicks deeper than direct.
  */
 export function resolveMarketUrl(market: {
   market_url?: string | null;
   slug?: string | null;
+  question?: string | null;
   id?: string | null;
 } | null | undefined): string | null {
   if (!market) return null;
   if (market.market_url) return market.market_url;
-  if (market.id) return buildPolymarketUrl(market.slug, market.id);
-  return null;
+  return buildPolymarketUrl(market);
 }
 
 interface MarketLinkIconProps {

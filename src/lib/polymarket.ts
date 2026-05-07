@@ -1,5 +1,10 @@
 import { getSupabaseClient } from './supabase';
 
+interface PolymarketAPIEvent {
+  slug?: string;
+  title?: string;
+}
+
 interface PolymarketAPIMarket {
   id: string;
   slug?: string;
@@ -13,6 +18,12 @@ interface PolymarketAPIMarket {
   groupItemTagged?: string;
   endDate?: string;
   active: boolean;
+  /**
+   * Each market belongs to a parent event. The PUBLIC URL on polymarket.com
+   * is keyed off the EVENT slug, NOT the market's own slug — this is the
+   * one detail that makes URL construction correct vs 404.
+   */
+  events?: PolymarketAPIEvent[];
 }
 
 export interface Market {
@@ -34,15 +45,52 @@ export interface Market {
 }
 
 /**
- * Build a public Polymarket URL for a market. Slug-based URL is the
- * canonical form (e.g. /event/will-fed-cut-rates-in-june-2025). When slug
- * is missing, fall back to the id-based form which Polymarket also serves.
+ * Shape accepted by `buildPolymarketUrl`. Both the API response and the DB
+ * row can satisfy this — fields are all optional so the function can degrade
+ * gracefully when called from the frontend with a partial DB row.
  */
-export function buildPolymarketUrl(slug: string | null | undefined, id: string): string {
-  if (slug && slug.trim()) {
-    return `https://polymarket.com/event/${slug.trim()}`;
+export interface MarketUrlInput {
+  events?: Array<{ slug?: string | null }> | null;
+  slug?: string | null;
+  question?: string | null;
+  id?: string | null;
+}
+
+/**
+ * Build a public Polymarket URL for a market.
+ *
+ * IMPORTANT: Polymarket markets are nested under parent events. The market's
+ * OWN `slug` field is NOT the URL slug — that route returns 404. The correct
+ * slug lives on `events[0].slug`. We try in this order:
+ *   1. Parent event slug (canonical, always works when events array present)
+ *   2. Market's own slug treated as event slug (legacy/fallback, may 404)
+ *   3. Search URL by question text (always works regardless of slug format)
+ *   4. id-based URL (last resort)
+ */
+export function buildPolymarketUrl(market: MarketUrlInput): string {
+  // 1. Parent event slug — the correct URL key
+  const eventSlug = market.events?.[0]?.slug;
+  if (eventSlug && eventSlug.trim()) {
+    return `https://polymarket.com/event/${eventSlug.trim()}`;
   }
-  return `https://polymarket.com/market/${id}`;
+
+  // 2. Market's own slug as event slug (legacy, may 404 but worth trying
+  //    when the events array isn't available — e.g. building from a DB row)
+  if (market.slug && market.slug.trim()) {
+    return `https://polymarket.com/event/${market.slug.trim()}`;
+  }
+
+  // 3. Search by question text — the always-works fallback
+  if (market.question && market.question.trim()) {
+    return `https://polymarket.com/?q=${encodeURIComponent(market.question.trim())}`;
+  }
+
+  // 4. id-based URL (rarely needed, but better than nothing)
+  if (market.id) {
+    return `https://polymarket.com/market/${market.id}`;
+  }
+
+  return 'https://polymarket.com';
 }
 
 const DISCOVERY_SEARCH_TERMS = [
@@ -163,7 +211,9 @@ export async function fetchAndStoreMarkets(limit = 250): Promise<number> {
         category: market.category ?? market.groupItemTagged ?? 'uncategorized',
         end_date: market.endDate ?? null,
         is_active: market.active,
-        market_url: buildPolymarketUrl(slug, market.id),
+        // Pass the FULL market — the URL builder needs `events` to pick the
+        // parent event slug (the only slug that yields a working URL).
+        market_url: buildPolymarketUrl(market),
         fetched_at: fetchedAt,
         raw: market,
       };
