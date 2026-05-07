@@ -7,6 +7,8 @@ type MarketInfo = {
   question: string;
   probability: number;
   volume: number;
+  category?: string;
+  end_date?: string | null;
 };
 
 type SignalRow = {
@@ -36,13 +38,22 @@ export default function SignalsPage() {
 
   useEffect(() => {
     async function fetchSignals() {
-      const { data } = await supabase
+      const { data: signalData, error } = await supabase
         .from('signals')
-        .select('id, markets(question, probability, volume), probability_change, affected_stocks, urgency, signal_type, confidence, is_relevant, reason, signal_direction, analyzed_at')
-        .order('analyzed_at', { ascending: false })
-        .limit(200);
+        .select(`
+          *,
+          markets (
+            question,
+            probability,
+            volume,
+            category,
+            end_date
+          )
+        `)
+        .order('analyzed_at', { ascending: false });
 
-      if (data) setSignals(data as unknown as SignalRow[]);
+      if (error) console.error('[Signals] Supabase fetch error:', error.message);
+      if (signalData) setSignals(signalData as unknown as SignalRow[]);
       setLoading(false);
     }
     fetchSignals();
