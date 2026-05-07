@@ -28,8 +28,21 @@ export interface Market {
   category: string;
   end_date: string | null;
   is_active: boolean;
+  market_url: string;
   fetched_at: string;
   raw: PolymarketAPIMarket;
+}
+
+/**
+ * Build a public Polymarket URL for a market. Slug-based URL is the
+ * canonical form (e.g. /event/will-fed-cut-rates-in-june-2025). When slug
+ * is missing, fall back to the id-based form which Polymarket also serves.
+ */
+export function buildPolymarketUrl(slug: string | null | undefined, id: string): string {
+  if (slug && slug.trim()) {
+    return `https://polymarket.com/event/${slug.trim()}`;
+  }
+  return `https://polymarket.com/market/${id}`;
 }
 
 const DISCOVERY_SEARCH_TERMS = [
@@ -136,9 +149,10 @@ export async function fetchAndStoreMarkets(limit = 250): Promise<number> {
     .map((market) => {
       const yesPrice = getYesPrice(market);
 
+      const slug = market.slug ?? null;
       return {
         id: market.id,
-        slug: market.slug ?? null,
+        slug,
         question: market.question,
         description: market.description ?? null,
         probability: yesPrice,
@@ -149,6 +163,7 @@ export async function fetchAndStoreMarkets(limit = 250): Promise<number> {
         category: market.category ?? market.groupItemTagged ?? 'uncategorized',
         end_date: market.endDate ?? null,
         is_active: market.active,
+        market_url: buildPolymarketUrl(slug, market.id),
         fetched_at: fetchedAt,
         raw: market,
       };

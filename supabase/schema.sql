@@ -25,6 +25,10 @@ alter table markets add column if not exists no_price double precision;
 alter table markets add column if not exists liquidity double precision default 0;
 alter table markets add column if not exists raw jsonb;
 alter table markets add column if not exists first_seen_at timestamptz default now();
+-- Pre-computed Polymarket URL — built at ingest time so the frontend doesn't
+-- have to encode URL logic, and it survives if Polymarket changes their URL
+-- structure (we only update the ingest, not every consumer).
+alter table markets add column if not exists market_url text;
 
 create table if not exists analyst_config (
   id text primary key default 'default',

@@ -4,13 +4,17 @@ import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { DirectionBadge } from '@/components/DirectionBadge';
 import { ProbChangeBadge } from '@/components/ProbChangeBadge';
+import { MarketLinkIcon, resolveMarketUrl } from '@/components/MarketLink';
 
 type PipelineStatus = 'idle' | 'ingesting' | 'analyzing' | 'reporting' | 'done' | 'error';
 
 type MarketInfo = {
+  id?: string;
   question: string;
   probability: number;
   volume: number;
+  slug?: string | null;
+  market_url?: string | null;
 };
 
 type SignalRow = {
@@ -145,7 +149,7 @@ export default function Dashboard() {
       // Fetch Top Signals — get relevant signals and sort by significance score
       const { data: top } = await supabase
         .from('signals')
-        .select('*, markets(question, probability, volume)')
+        .select('*, markets(id, question, probability, volume, slug, market_url)')
         .eq('is_relevant', true)
         .order('analyzed_at', { ascending: false })
         .limit(20); // Fetch more, sort by significance
@@ -274,10 +278,16 @@ export default function Dashboard() {
                   const prob = (m?.probability || 0) * 100;
                   const volume = m?.volume || 0;
                   const volumeLabel = formatVolume(volume);
+                  const marketUrl = resolveMarketUrl(m);
 
                   return (
                     <tr key={s.id} className="hover:bg-[#1f2937]/50 transition-colors">
-                      <td className="px-6 py-4 font-medium text-white max-w-md truncate" title={m?.question}>{m?.question}</td>
+                      <td className="px-6 py-4 max-w-md">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-white truncate" title={m?.question}>{m?.question}</span>
+                          {marketUrl && <MarketLinkIcon url={marketUrl} />}
+                        </div>
+                      </td>
                       <td className="px-6 py-4">
                         <div className="flex flex-col gap-2">
                           <div className="flex items-center gap-2">

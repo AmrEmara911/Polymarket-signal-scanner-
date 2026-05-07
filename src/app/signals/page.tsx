@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { DirectionBadge } from '@/components/DirectionBadge';
 import { ProbChangeBadge } from '@/components/ProbChangeBadge';
+import { MarketLinkIcon, MarketLinkButton, resolveMarketUrl } from '@/components/MarketLink';
 
 /**
  * Format a USD volume figure as a compact human-readable string.
@@ -16,11 +17,14 @@ function formatVolume(volume: number): string {
 }
 
 type MarketInfo = {
+  id?: string;
   question: string;
   probability: number;
   volume: number;
   category?: string;
   end_date?: string | null;
+  slug?: string | null;
+  market_url?: string | null;
 };
 
 type SignalRow = {
@@ -56,11 +60,14 @@ export default function SignalsPage() {
         .select(`
           *,
           markets (
+            id,
             question,
             probability,
             volume,
             category,
-            end_date
+            end_date,
+            slug,
+            market_url
           )
         `)
         .order('analyzed_at', { ascending: false });
@@ -172,6 +179,7 @@ export default function SignalsPage() {
                 const prob = (m?.probability || 0) * 100;
                 const isExpanded = expandedId === s.id;
                 const hasPreviewOverflow = question.length > 42 || reason.length > 58;
+                const marketUrl = resolveMarketUrl(m);
 
                 return (
                   <React.Fragment key={s.id}>
@@ -181,8 +189,11 @@ export default function SignalsPage() {
                     >
                       <td className="px-6 py-4">
                         <div className="max-w-[360px]">
-                          <div className="text-white font-medium truncate" title={question}>
-                            {question}
+                          <div className="flex items-center gap-2">
+                            <span className="text-white font-medium truncate" title={question}>
+                              {question}
+                            </span>
+                            {marketUrl && <MarketLinkIcon url={marketUrl} />}
                           </div>
                           <div className="mt-1 flex items-center gap-2 text-xs">
                             <span className="min-w-0 truncate text-[#9ca3af]" title={reason}>
@@ -284,6 +295,11 @@ export default function SignalsPage() {
                               </ul>
                             </div>
                           </div>
+                          {marketUrl && (
+                            <div className="mt-6 pt-4 border-t border-[#1f2937]">
+                              <MarketLinkButton url={marketUrl} />
+                            </div>
+                          )}
                         </td>
                       </tr>
                     )}

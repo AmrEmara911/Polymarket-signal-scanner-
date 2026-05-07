@@ -2,6 +2,15 @@
 
 import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
+import { supabase } from '@/lib/supabase';
+import { resolveMarketUrl } from '@/components/MarketLink';
+
+interface MarketRef {
+  id: string;
+  question: string;
+  slug: string | null;
+  market_url: string | null;
+}
 
 export default function ReportsPage() {
   interface ReportRow {
@@ -9,9 +18,12 @@ export default function ReportsPage() {
     generated_at: string;
     content: string;
     signal_count: number;
+    market_ids: string[] | null;
   }
 
   const [reports, setReports] = useState<ReportRow[]>([]);
+  // Map: market_id -> { question, market_url } for rendering source links
+  const [marketLookup, setMarketLookup] = useState<Map<string, MarketRef>>(new Map());
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,7 +36,25 @@ export default function ReportsPage() {
       throw new Error(payload.error ?? 'Failed to load reports');
     }
 
-    setReports(payload.reports ?? []);
+    const loadedReports = (payload.reports ?? []) as ReportRow[];
+    setReports(loadedReports);
+
+    // Collect every market_id cited across all reports, deduped, then fetch
+    // them in one round-trip to build a lookup map for the footers.
+    const allMarketIds = Array.from(
+      new Set(loadedReports.flatMap((r) => r.market_ids ?? []).filter(Boolean))
+    );
+    if (allMarketIds.length > 0) {
+      const { data: markets } = await supabase
+        .from('markets')
+        .select('id, question, slug, market_url')
+        .in('id', allMarketIds);
+      const map = new Map<string, MarketRef>();
+      for (const m of (markets ?? []) as MarketRef[]) {
+        map.set(m.id, m);
+      }
+      setMarketLookup(map);
+    }
   }
 
   useEffect(() => {
@@ -125,6 +155,54 @@ export default function ReportsPage() {
               prose-blockquote:border-l-[#3b82f6] prose-blockquote:text-[#9ca3af]">
               <ReactMarkdown>{r.content}</ReactMarkdown>
             </div>
+
+            {/* Source markets — clickable links to the underlying Polymarket pages */}
+            {r.market_ids && r.market_ids.length > 0 && (
+              <div className="px-8 pb-8">
+                <h4 className="text-sm font-semibold text-white uppercase tracking-wide mb-3">
+                  Markets Cited ({r.market_ids.length})
+                </h4>
+                <ul className="space-y-2">
+                  {r.market_ids.map((mid) => {
+                    const market = marketLookup.get(mid);
+                    const url = resolveMarketUrl(market ?? { id: mid });
+                    const label = market?.question ?? mid;
+                    return (
+                      <li key={mid}>
+                        {url ? (
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-sm text-[#3b82f6] hover:text-[#60a5fa] hover:underline transition-colors inline-flex items-center gap-1.5"
+                          >
+                            <span className="truncate max-w-2xl">{label}</span>
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              width="12"
+                              height="12"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.25"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              className="shrink-0"
+                              aria-hidden="true"
+                            >
+                              <path d="M7 17 17 7" />
+                              <path d="M7 7h10v10" />
+                            </svg>
+                          </a>
+                        ) : (
+                          <span className="text-sm text-[#6b7280]">{label}</span>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
           </div>
         ))
       )}
