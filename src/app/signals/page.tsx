@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabase';
 import { DirectionBadge } from '@/components/DirectionBadge';
 import { ProbChangeBadge } from '@/components/ProbChangeBadge';
 import { MarketLinkIcon, MarketLinkButton, resolveMarketUrl } from '@/components/MarketLink';
+import { Sparkline } from '@/components/Sparkline';
 
 /**
  * Format a USD volume figure as a compact human-readable string.
@@ -43,6 +44,9 @@ type SignalRow = {
 
 export default function SignalsPage() {
   const [signals, setSignals] = useState<SignalRow[]>([]);
+  // Map: market_id → ordered probability series (oldest → newest), last 7 days.
+  // Populated in one batched query after signals load to avoid N+1.
+  const [trendByMarket, setTrendByMarket] = useState<Map<string, number[]>>(new Map());
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -73,8 +77,42 @@ export default function SignalsPage() {
         .order('analyzed_at', { ascending: false });
 
       if (error) console.error('[Signals] Supabase fetch error:', error.message);
-      if (signalData) setSignals(signalData as unknown as SignalRow[]);
+      const rows = (signalData ?? []) as unknown as SignalRow[];
+      setSignals(rows);
       setLoading(false);
+
+      // Batched fetch for 7-day trend sparklines. One query, grouped client-side
+      // by market_id — no N+1 even with hundreds of signals.
+      const marketIds = Array.from(
+        new Set(
+          rows
+            .map((r) => (Array.isArray(r.markets) ? r.markets[0]?.id : r.markets?.id))
+            .filter((v): v is string => Boolean(v))
+        )
+      );
+      if (marketIds.length > 0) {
+        const sevenDaysAgoIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const { data: snaps, error: snapErr } = await supabase
+          .from('probability_snapshots')
+          .select('market_id, probability, recorded_at')
+          .in('market_id', marketIds)
+          .gte('recorded_at', sevenDaysAgoIso)
+          .order('recorded_at', { ascending: true });
+
+        if (snapErr) {
+          console.error('[Signals] Snapshot fetch error:', snapErr.message);
+        } else {
+          const byMarket = new Map<string, number[]>();
+          for (const s of (snaps ?? []) as Array<{ market_id: string; probability: number }>) {
+            const existing = byMarket.get(s.market_id);
+            const value = Number(s.probability);
+            if (!Number.isFinite(value)) continue;
+            if (existing) existing.push(value);
+            else byMarket.set(s.market_id, [value]);
+          }
+          setTrendByMarket(byMarket);
+        }
+      }
     }
     fetchSignals();
   }, []);
@@ -163,6 +201,7 @@ export default function SignalsPage() {
               <tr>
                 <th className="px-6 py-4 w-1/3">Market Question</th>
                 <th className="px-4 py-4">Prob (24H)</th>
+                <th className="px-4 py-4">Trend</th>
                 <th className="px-4 py-4">Relevant</th>
                 <th className="px-4 py-4">Confidence</th>
                 <th className="px-4 py-4">Signal Type</th>
@@ -223,6 +262,9 @@ export default function SignalsPage() {
                           <ProbChangeBadge change={s.probability_change} />
                         </div>
                       </td>
+                      <td className="px-4 py-4 w-[80px]">
+                        <Sparkline data={(m?.id && trendByMarket.get(m.id)) || []} />
+                      </td>
                       <td className="px-4 py-4">
                         {s.is_relevant ? (
                           <span className="text-[#10b981] font-bold">✓</span>
@@ -276,7 +318,7 @@ export default function SignalsPage() {
                     {/* Expanded Row Content */}
                     {isExpanded && (
                       <tr className="bg-[#0a0f1e]/50">
-                        <td colSpan={8} className="px-6 py-6 border-l-2 border-[#3b82f6]">
+                        <td colSpan={9} className="px-6 py-6 border-l-2 border-[#3b82f6]">
                           <div className="grid grid-cols-2 gap-8 text-sm">
                             <div>
                               <h4 className="font-semibold text-white mb-2">Market Details</h4>
