@@ -18,7 +18,34 @@ type SignalRow = {
   affected_stocks: string[] | null;
   urgency: string | null;
   signal_type: string | null;
+  signal_direction: string | null;
+  confidence: number | null;
 };
+
+function calculateSignificance(signal: SignalRow): number {
+  // Urgency weight (high=3, medium=2, low=1)
+  const urgencyScore = signal.urgency === 'high' ? 3 :
+                       signal.urgency === 'medium' ? 2 : 1;
+
+  // Conviction weight: how extreme the probability is (closer to 0% or 100% = stronger)
+  const m = Array.isArray(signal.markets) ? signal.markets[0] : signal.markets;
+  const probability = m?.probability || 0.5;
+  const conviction = Math.abs(probability - 0.5) * 2; // 0 to 1
+
+  // Volume credibility (log scale, 0 to 1)
+  const volume = m?.volume || 0;
+  const volumeScore = Math.min(Math.log10(volume + 1) / 7, 1);
+
+  // Probability change (movement is signal, 0 to 2)
+  const change = Math.abs(signal.probability_change || 0);
+  const changeScore = Math.min(change * 3, 2);
+
+  // Confidence from the LLM (0 to 1)
+  const confidence = signal.confidence || 0.5;
+
+  // Weighted sum: urgency is most important, then conviction and confidence
+  return (urgencyScore * 2) + (conviction * 2) + volumeScore + changeScore + confidence;
+}
 
 async function runPipeline(onStep: (status: PipelineStatus, msg: string) => void) {
   onStep('ingesting', 'Step 1/3 — Ingesting markets...');
@@ -86,15 +113,21 @@ export default function Dashboard() {
         lastUpdated: latestSignal?.[0]?.analyzed_at ? new Date(latestSignal[0].analyzed_at).toLocaleString() : 'Never'
       });
 
-      // Fetch Top Signals — most recent relevant signals regardless of date
+      // Fetch Top Signals — get relevant signals and sort by significance score
       const { data: top } = await supabase
         .from('signals')
         .select('*, markets(question, probability, volume)')
         .eq('is_relevant', true)
         .order('analyzed_at', { ascending: false })
-        .limit(5);
+        .limit(20); // Fetch more, sort by significance
 
-      if (top) setTopSignals(top as unknown as SignalRow[]);
+      if (top) {
+        const signals = top as unknown as SignalRow[];
+        const sorted = [...signals]
+          .sort((a, b) => calculateSignificance(b) - calculateSignificance(a))
+          .slice(0, 5); // Take top 5 by significance
+        setTopSignals(sorted);
+      }
       setLoading(false);
     }
     fetchData();
@@ -193,8 +226,9 @@ export default function Dashboard() {
             <thead className="bg-[#0a0f1e] text-[#9ca3af] uppercase font-semibold text-xs border-b border-[#1f2937]">
               <tr>
                 <th className="px-6 py-4">Market Question</th>
-                <th className="px-6 py-4">Probability</th>
+                <th className="px-6 py-4">Probability (24H)</th>
                 <th className="px-6 py-4">Affected Stocks</th>
+                <th className="px-6 py-4">Direction</th>
                 <th className="px-6 py-4">Urgency</th>
                 <th className="px-6 py-4">Signal Type</th>
               </tr>
@@ -202,42 +236,71 @@ export default function Dashboard() {
             <tbody className="divide-y divide-[#1f2937]">
               {topSignals.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-6 py-8 text-center">No highly relevant signals found.</td>
+                  <td colSpan={6} className="px-6 py-8 text-center">No highly relevant signals found.</td>
                 </tr>
               ) : (
                 topSignals.map((s) => {
                   const m = Array.isArray(s.markets) ? s.markets[0] : s.markets;
                   const prob = (m?.probability || 0) * 100;
+                  const volume = m?.volume || 0;
+                  const volumeLabel = volume >= 1_000_000
+                    ? `$${(volume / 1_000_000).toFixed(1)}M`
+                    : volume >= 1_000
+                    ? `$${(volume / 1_000).toFixed(0)}K`
+                    : `$${volume.toFixed(0)}`;
+
+                  // Determine direction badge
+                  const getDirectionBadge = () => {
+                    if (!s.signal_direction) return <span className="text-gray-400">◆ UNCLEAR</span>;
+                    const lower = s.signal_direction.toLowerCase();
+                    if (lower.includes('bullish') || lower.includes('positive') || lower.includes('up')) {
+                      return <span className="text-[#10b981] font-semibold">↑ BULLISH</span>;
+                    }
+                    if (lower.includes('bearish') || lower.includes('negative') || lower.includes('down')) {
+                      return <span className="text-[#ef4444] font-semibold">↓ BEARISH</span>;
+                    }
+                    return <span className="text-gray-400">◆ NEUTRAL</span>;
+                  };
+
                   return (
                     <tr key={s.id} className="hover:bg-[#1f2937]/50 transition-colors">
                       <td className="px-6 py-4 font-medium text-white max-w-md truncate" title={m?.question}>{m?.question}</td>
                       <td className="px-6 py-4">
-                        <div className="flex flex-col gap-1">
+                        <div className="flex flex-col gap-2">
                           <div className="flex items-center gap-2">
-                            <span className="font-mono w-12">{prob.toFixed(1)}%</span>
+                            <span className="font-mono font-semibold text-white">{prob.toFixed(1)}%</span>
                             <div className="w-16 h-1.5 bg-[#1f2937] rounded-full overflow-hidden">
                               <div className="h-full bg-[#3b82f6]" style={{ width: `${prob}%` }}></div>
                             </div>
                           </div>
-                          {s.probability_change != null && Math.abs(s.probability_change) >= 0.10 && (
+                          {s.probability_change != null && Math.abs(s.probability_change) >= 0.05 && (
                             <span className={`text-xs font-semibold px-1.5 py-0.5 rounded w-fit ${
                               s.probability_change > 0
                                 ? 'bg-[#10b981]/20 text-[#10b981]'
                                 : 'bg-[#ef4444]/20 text-[#ef4444]'
                             }`}>
-                              {s.probability_change > 0 ? '↑ +' : '↓ '}{(s.probability_change * 100).toFixed(0)}%
+                              {s.probability_change > 0 ? '↑ +' : '↓ '}{(s.probability_change * 100).toFixed(0)}pp
                             </span>
                           )}
                         </div>
                       </td>
                       <td className="px-6 py-4">
-                        <div className="flex flex-wrap gap-1">
-                          {s.affected_stocks?.map((stock) => (
-                            <span key={stock} className="px-2 py-0.5 rounded-full bg-[#3b82f6]/20 text-[#3b82f6] text-xs font-medium">
-                              {stock}
-                            </span>
-                          ))}
+                        <div className="flex flex-col gap-2">
+                          <div className="flex flex-wrap gap-1">
+                            {s.affected_stocks?.slice(0, 3).map((stock) => (
+                              <span key={stock} className="px-2 py-0.5 rounded-full bg-[#3b82f6]/20 text-[#3b82f6] text-xs font-medium">
+                                {stock}
+                              </span>
+                            ))}
+                            {(s.affected_stocks?.length ?? 0) > 3 && (
+                              <span className="text-xs text-[#9ca3af]">+{(s.affected_stocks?.length ?? 0) - 3}</span>
+                            )}
+                          </div>
+                          <span className="text-xs text-[#6b7280]">{volumeLabel} volume</span>
                         </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        {getDirectionBadge()}
                       </td>
                       <td className="px-6 py-4">
                         <span className={`px-2.5 py-1 rounded-full text-xs font-semibold capitalize ${
@@ -249,7 +312,7 @@ export default function Dashboard() {
                         </span>
                       </td>
                       <td className="px-6 py-4">
-                        <span className="capitalize text-gray-300">{s.signal_type}</span>
+                        <span className="capitalize text-gray-300">{s.signal_type || '—'}</span>
                       </td>
                     </tr>
                   );
