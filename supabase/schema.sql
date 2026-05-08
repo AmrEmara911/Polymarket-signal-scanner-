@@ -103,6 +103,11 @@ alter table signals add column if not exists evidence text[] default '{}';
 alter table signals add column if not exists key_risks text[] default '{}';
 alter table signals add column if not exists suggested_action text;
 alter table signals add column if not exists model text;
+-- BIT Capital portfolio-aware tags. Set by the LLM analyst pass.
+alter table signals add column if not exists thematic_buckets text[];
+-- Flagged when probability is in a contested range and has moved sharply
+-- on credible volume — the "act before consensus" thesis.
+alter table signals add column if not exists is_ahead_of_curve boolean default false;
 
 create table if not exists reports (
   id uuid primary key default gen_random_uuid(),

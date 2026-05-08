@@ -52,6 +52,20 @@ interface MarketForAnalysis {
   probability_change?: number | null; // vs 24h ago (fractional, e.g. 0.15 = +15pp)
 }
 
+/** Canonical BIT Capital thematic buckets — also referenced in the LLM prompt. */
+export const THEMATIC_BUCKETS = [
+  'AI Infrastructure',   // IREN, NVDA, AMD, APLD, COHR
+  'Big Tech Platforms',  // MSFT, GOOGL, META, AAPL, AMZN
+  'Fintech',             // SOFI, LMND
+  'Digital Assets',      // IREN, CRCL, GLXY
+  'Digital Health',      // HNGE, HIMS, LMND
+  'Cybersecurity',       // NTSK
+  'Macro/Rates',         // affects everything
+] as const;
+
+export type ThematicBucket = (typeof THEMATIC_BUCKETS)[number];
+const VALID_BUCKETS_SET = new Set<string>(THEMATIC_BUCKETS);
+
 interface RawSignal {
   market_id: string;
   is_relevant: boolean;
@@ -68,6 +82,8 @@ interface RawSignal {
   key_risks: string[];
   suggested_action: string;
   probability_change?: number | null; // set post-LLM from snapshot data
+  thematic_buckets?: string[]; // BIT Capital exposure tags
+  is_ahead_of_curve?: boolean; // contested range + sharp move + credible vol
 }
 
 interface OpenAISignalResponse {
@@ -205,6 +221,27 @@ function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSign
   return signal;
 }
 
+/**
+ * Deterministic check for the BIT Capital "Ahead of the Curve" thesis:
+ *  - the market has moved > 15pp in the last 24h (sharp shift)
+ *  - the probability sits in the 25-75% contested range (consensus hasn't formed)
+ *  - volume is over $50K (credible, not a thin/manipulable market)
+ *
+ * If any rule fails, we still honor the LLM's flag (it may catch judgmental
+ * cases the rules miss). This is `OR` not `AND` — either path can flag.
+ */
+function isAheadOfCurveDeterministic(market: MarketForAnalysis): boolean {
+  const probChange = market.probability_change ?? 0;
+  const probability = market.probability ?? 0.5;
+  const volume = market.volume ?? 0;
+
+  const sharpMove = Math.abs(probChange) > 0.15;
+  const contested = probability >= 0.25 && probability <= 0.75;
+  const credible = volume > 50_000;
+
+  return sharpMove && contested && credible;
+}
+
 function normalizeSignal(
   signal: RawSignal,
   marketById: Map<string, MarketForAnalysis>
@@ -220,6 +257,23 @@ function normalizeSignal(
     gatedSignal.is_relevant &&
     probChange !== null &&
     Math.abs(probChange) > 0.20;
+
+  // Ahead-of-curve: deterministic OR LLM-flagged. Only set on relevant signals.
+  const aheadOfCurve =
+    gatedSignal.is_relevant &&
+    (isAheadOfCurveDeterministic(market) || Boolean(gatedSignal.is_ahead_of_curve));
+
+  // Filter thematic buckets to the canonical set so typos/hallucinations don't
+  // leak into the DB and break the dashboard's group-by-bucket aggregation.
+  const cleanedBuckets = Array.isArray(gatedSignal.thematic_buckets)
+    ? Array.from(
+        new Set(
+          gatedSignal.thematic_buckets
+            .map((b) => String(b).trim())
+            .filter((b) => VALID_BUCKETS_SET.has(b))
+        )
+      )
+    : [];
 
   return {
     market_id: gatedSignal.market_id,
@@ -245,6 +299,8 @@ function normalizeSignal(
       : [],
     suggested_action: String(gatedSignal.suggested_action ?? '').slice(0, 700),
     probability_change: probChange,
+    thematic_buckets: cleanedBuckets,
+    is_ahead_of_curve: aheadOfCurve,
   };
 }
 
@@ -459,6 +515,31 @@ Important: direct markets about a stock crossing a price level on a specific dat
 
 The deterministic_candidate_score is a triage hint. You may disagree with it, but explain why in the reason/thesis.
 
+PORTFOLIO WEIGHTING — use this to determine urgency:
+
+TIER 1 — LARGE POSITIONS (>$100M): IREN, MSFT, GOOGL, META, NVDA — signals affecting these are ALWAYS high urgency.
+TIER 2 — MEDIUM POSITIONS ($30-100M): RDDT, HIMS, LMND, HNGE, SOFI, AMD, AMZN, AAPL — signals affecting these default to medium urgency unless the event is highly impactful (then high).
+TIER 3 — SMALLER POSITIONS (<$30M): CRCL, APLD, COHR, GLXY, NTSK — signals affecting these default to low or medium urgency.
+
+A signal about IREN (Tier 1) should be MORE URGENT than a signal about NTSK (Tier 3), even if the event significance is similar. Position size is a multiplier on urgency. Pure-macro signals (Fed, tariffs, AI regulation) are high urgency by default because they affect the whole book.
+
+THEMATIC EXPOSURE TAGGING — return as an array on every relevant signal:
+
+For each relevant signal, tag which BIT Capital thematic buckets it affects. Use these EXACT strings (case-sensitive):
+- "AI Infrastructure"  → IREN, NVDA, AMD, APLD, COHR (chip makers, data-center compute, mining infra)
+- "Big Tech Platforms" → MSFT, GOOGL, META, AAPL, AMZN
+- "Fintech"            → SOFI, LMND
+- "Digital Assets"     → IREN, CRCL, GLXY (crypto-adjacent equities and miners)
+- "Digital Health"     → HNGE, HIMS, LMND
+- "Cybersecurity"      → NTSK
+- "Macro/Rates"        → use this for Fed/rates/inflation/tariff/regulation events that affect the whole book
+
+A single signal can affect multiple buckets (e.g. AI export controls hits "AI Infrastructure" AND "Macro/Rates"). Return an empty array only if not relevant.
+
+AHEAD OF THE CURVE — set is_ahead_of_curve: true when:
+
+Mark is_ahead_of_curve = true for signals where the probability is in a contested range (25-75%) and the market hasn't reached consensus yet. These are the most valuable for BIT Capital because their thesis is to act BEFORE the market settles. A market at 95% has already settled — even if relevant, it's not "ahead of curve" because consensus has already formed. Conversely, a market at 50% with sharp recent movement is exactly the regime where BIT wants to position. (We'll also flag this deterministically when a market has moved >15pp on >$50K volume in the contested range, but you should also flag judgmental cases — emerging narratives, contested regulatory outcomes, where the market is still figuring out what to price.)
+
 Return JSON only with this shape:
 {
   "signals": [
@@ -473,6 +554,8 @@ Return JSON only with this shape:
       "signal_type": "macro|rates|tariff|regulatory|company|sector|crypto|null",
       "signal_direction": "positive|negative|mixed|unclear|null",
       "urgency": "high|medium|low",
+      "thematic_buckets": ["AI Infrastructure", "Macro/Rates"],
+      "is_ahead_of_curve": false,
       "thesis": "specific equity impact thesis",
       "evidence": ["why the market probability matters"],
       "key_risks": ["why this could be noise"],

@@ -5,7 +5,56 @@ import { supabase } from '@/lib/supabase';
 import { DirectionBadge } from '@/components/DirectionBadge';
 import { ProbChangeBadge } from '@/components/ProbChangeBadge';
 import { MarketLinkIcon, resolveMarketUrl } from '@/components/MarketLink';
+import { AheadOfCurveBadge } from '@/components/AheadOfCurveBadge';
 import { formatRelativeTime, formatFullTimestamp } from '@/lib/format-time';
+
+const THEMATIC_BUCKETS = [
+  'AI Infrastructure',
+  'Big Tech Platforms',
+  'Fintech',
+  'Digital Assets',
+  'Digital Health',
+  'Cybersecurity',
+  'Macro/Rates',
+] as const;
+type ThematicBucket = (typeof THEMATIC_BUCKETS)[number];
+
+interface BucketStats {
+  count: number;
+  positive: number;
+  negative: number;
+}
+
+/**
+ * Categorize a signal_direction string into 'positive' | 'negative' | 'neutral'
+ * — same logic as the DirectionBadge component, kept local here so the dashboard
+ * can aggregate without rendering.
+ */
+function classifyDirection(d: string | null | undefined): 'positive' | 'negative' | 'neutral' {
+  if (!d) return 'neutral';
+  const lower = d.toLowerCase();
+  if (/(bullish|positive|\bup\b|rise|increase)/.test(lower)) return 'positive';
+  if (/(bearish|negative|\bdown\b|fall|decrease)/.test(lower)) return 'negative';
+  return 'neutral';
+}
+
+function netDirectionLabel(stats: BucketStats): {
+  label: string;
+  border: string;
+  text: string;
+} {
+  const { count, positive, negative } = stats;
+  if (count === 0) return { label: 'No active signals', border: 'border-[#1f2937]', text: 'text-[#6b7280]' };
+  const total = positive + negative;
+  // Mostly directional → >70% one side
+  if (total > 0 && positive / total > 0.7) {
+    return { label: 'Mostly positive', border: 'border-[#10b981]/40', text: 'text-[#10b981]' };
+  }
+  if (total > 0 && negative / total > 0.7) {
+    return { label: 'Mostly negative', border: 'border-[#ef4444]/40', text: 'text-[#ef4444]' };
+  }
+  return { label: 'Mixed', border: 'border-[#f59e0b]/40', text: 'text-[#f59e0b]' };
+}
 
 type PipelineStatus = 'idle' | 'ingesting' | 'analyzing' | 'reporting' | 'done' | 'error';
 
@@ -27,6 +76,8 @@ type SignalRow = {
   signal_type: string | null;
   signal_direction: string | null;
   confidence: number | null;
+  thematic_buckets: string[] | null;
+  is_ahead_of_curve: boolean | null;
 };
 
 /**
@@ -111,6 +162,13 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, []);
   const [topSignals, setTopSignals] = useState<SignalRow[]>([]);
+  // Bucket aggregates for the "Thematic Exposure Today" section. Computed
+  // from ALL relevant signals, not just the top 5 in the table above.
+  const [thematicStats, setThematicStats] = useState<Record<ThematicBucket, BucketStats>>(
+    () => Object.fromEntries(
+      THEMATIC_BUCKETS.map((b) => [b, { count: 0, positive: 0, negative: 0 }])
+    ) as Record<ThematicBucket, BucketStats>
+  );
   const [loading, setLoading] = useState(true);
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>('idle');
   const [pipelineMessage, setPipelineMessage] = useState('');
@@ -177,6 +235,37 @@ export default function Dashboard() {
           .slice(0, 5); // Take top 5 by significance
         setTopSignals(sorted);
       }
+
+      // Fetch ALL relevant signals (just the bucket + direction columns) for
+      // the "Thematic Exposure Today" aggregation. Separate query because we
+      // want every relevant signal, not just the top 20.
+      const { data: bucketRows } = await supabase
+        .from('signals')
+        .select('thematic_buckets, signal_direction')
+        .eq('is_relevant', true);
+
+      if (bucketRows) {
+        const stats = Object.fromEntries(
+          THEMATIC_BUCKETS.map((b) => [b, { count: 0, positive: 0, negative: 0 }])
+        ) as Record<ThematicBucket, BucketStats>;
+
+        for (const row of bucketRows as Array<{
+          thematic_buckets: string[] | null;
+          signal_direction: string | null;
+        }>) {
+          if (!Array.isArray(row.thematic_buckets)) continue;
+          const direction = classifyDirection(row.signal_direction);
+          for (const bucket of row.thematic_buckets) {
+            if (!THEMATIC_BUCKETS.includes(bucket as ThematicBucket)) continue;
+            const b = bucket as ThematicBucket;
+            stats[b].count += 1;
+            if (direction === 'positive') stats[b].positive += 1;
+            if (direction === 'negative') stats[b].negative += 1;
+          }
+        }
+        setThematicStats(stats);
+      }
+
       setLoading(false);
     }
     fetchData();
@@ -385,6 +474,7 @@ export default function Dashboard() {
                         <div className="flex items-center gap-2">
                           <span className="font-medium text-white truncate" title={m?.question}>{m?.question}</span>
                           {marketUrl && <MarketLinkIcon url={marketUrl} />}
+                          <AheadOfCurveBadge flagged={s.is_ahead_of_curve} />
                         </div>
                       </td>
                       <td className="px-6 py-4">
@@ -434,6 +524,34 @@ export default function Dashboard() {
               )}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      {/* Thematic Exposure Today — net direction per BIT Capital bucket */}
+      <div className="bg-[#111827] border border-[#1f2937] rounded-xl shadow-sm p-6">
+        <div className="flex items-baseline justify-between mb-4">
+          <h3 className="text-lg font-semibold text-white">Thematic Exposure Today</h3>
+          <span className="text-xs text-[#6b7280]">
+            Net direction across BIT Capital portfolio buckets
+          </span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+          {THEMATIC_BUCKETS.map((bucket) => {
+            const stats = thematicStats[bucket];
+            const meta = netDirectionLabel(stats);
+            return (
+              <div
+                key={bucket}
+                className={`bg-[#0a0f1e] border-l-4 ${meta.border} border-y border-r border-[#1f2937] rounded-lg p-3 transition-colors`}
+              >
+                <h4 className="text-sm font-semibold text-white">{bucket}</h4>
+                <p className="text-xs text-[#9ca3af] mt-0.5">
+                  {stats.count} {stats.count === 1 ? 'signal' : 'signals'}
+                </p>
+                <p className={`text-xs font-medium mt-1.5 ${meta.text}`}>{meta.label}</p>
+              </div>
+            );
+          })}
         </div>
       </div>
         </>

@@ -6,6 +6,7 @@ import { DirectionBadge } from '@/components/DirectionBadge';
 import { ProbChangeBadge } from '@/components/ProbChangeBadge';
 import { MarketLinkIcon, MarketLinkButton, resolveMarketUrl } from '@/components/MarketLink';
 import { Sparkline } from '@/components/Sparkline';
+import { AheadOfCurveBadge } from '@/components/AheadOfCurveBadge';
 import { formatRelativeTime, formatFullTimestamp } from '@/lib/format-time';
 
 /**
@@ -41,6 +42,8 @@ type SignalRow = {
   reason: string | null;
   signal_direction: string | null;
   analyzed_at: string;
+  thematic_buckets: string[] | null;
+  is_ahead_of_curve: boolean | null;
 };
 
 export default function SignalsPage() {
@@ -241,6 +244,7 @@ export default function SignalsPage() {
                               {question}
                             </span>
                             {marketUrl && <MarketLinkIcon url={marketUrl} />}
+                            <AheadOfCurveBadge flagged={s.is_ahead_of_curve} />
                           </div>
                           <div className="mt-1 flex items-center gap-2 text-xs">
                             <span className="min-w-0 truncate text-[#9ca3af]" title={reason}>
@@ -347,6 +351,12 @@ export default function SignalsPage() {
                                   </span>
                                 </li>
                                 <li><strong className="text-gray-300">All Stocks:</strong> {s.affected_stocks?.join(', ') || 'None'}</li>
+                                <li>
+                                  <strong className="text-gray-300">Thematic Buckets:</strong>{' '}
+                                  {s.thematic_buckets && s.thematic_buckets.length > 0
+                                    ? s.thematic_buckets.join(', ')
+                                    : 'None tagged'}
+                                </li>
                               </ul>
                             </div>
                           </div>
