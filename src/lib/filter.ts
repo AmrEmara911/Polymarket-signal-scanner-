@@ -56,15 +56,73 @@ interface MarketForAnalysis {
 export const THEMATIC_BUCKETS = [
   'AI Infrastructure',   // IREN, NVDA, AMD, APLD, COHR
   'Big Tech Platforms',  // MSFT, GOOGL, META, AAPL, AMZN
-  'Fintech',             // SOFI, LMND
-  'Digital Assets',      // IREN, CRCL, GLXY
+  'Fintech',             // SOFI, LMND, HIMS, CRCL
+  'Digital Assets',      // IREN, CRCL, GLXY, BTC/ETH
   'Digital Health',      // HNGE, HIMS, LMND
   'Cybersecurity',       // NTSK
-  'Macro/Rates',         // affects everything
+  'Macro/Rates',         // Fed, tariffs, inflation, AI regulation
 ] as const;
 
 export type ThematicBucket = (typeof THEMATIC_BUCKETS)[number];
 const VALID_BUCKETS_SET = new Set<string>(THEMATIC_BUCKETS);
+
+/**
+ * Deterministic ticker → bucket mapping. Used as a safety net so signals about
+ * known portfolio holdings still get tagged even when the LLM forgets to fill
+ * the thematic_buckets field. A holding can map to multiple buckets (e.g.
+ * IREN is both AI Infrastructure and Digital Assets).
+ */
+const STOCK_TO_BUCKETS: Record<string, ThematicBucket[]> = {
+  // Tier 1
+  IREN: ['AI Infrastructure', 'Digital Assets'],
+  MSFT: ['Big Tech Platforms'],
+  GOOGL: ['Big Tech Platforms'],
+  META: ['Big Tech Platforms'],
+  NVDA: ['AI Infrastructure'],
+  // Tier 2
+  AMD: ['AI Infrastructure'],
+  AMZN: ['Big Tech Platforms'],
+  AAPL: ['Big Tech Platforms'],
+  RDDT: ['Big Tech Platforms'],
+  HIMS: ['Fintech', 'Digital Health'],
+  LMND: ['Fintech', 'Digital Health'],
+  HNGE: ['Digital Health'],
+  SOFI: ['Fintech'],
+  // Tier 3
+  CRCL: ['Fintech', 'Digital Assets'],
+  APLD: ['AI Infrastructure'],
+  COHR: ['AI Infrastructure'],
+  GLXY: ['Digital Assets'],
+  NTSK: ['Cybersecurity'],
+  // Generic crypto tickers
+  BTC: ['Digital Assets'],
+  ETH: ['Digital Assets'],
+  BITCOIN: ['Digital Assets'],
+  ETHEREUM: ['Digital Assets'],
+};
+
+/** Infer buckets from affected_stocks list. Used as a safety net. */
+export function inferBucketsFromStocks(stocks: string[] | null | undefined): ThematicBucket[] {
+  if (!Array.isArray(stocks)) return [];
+  const out = new Set<ThematicBucket>();
+  for (const stock of stocks) {
+    const mapped = STOCK_TO_BUCKETS[String(stock).trim().toUpperCase()];
+    if (mapped) for (const b of mapped) out.add(b);
+  }
+  return Array.from(out);
+}
+
+/** Macro signal_type values always touch the Macro/Rates bucket. */
+export function inferBucketsFromSignalType(
+  signalType: string | null | undefined
+): ThematicBucket[] {
+  if (!signalType) return [];
+  const lower = signalType.toLowerCase();
+  if (lower === 'macro' || lower === 'rates' || lower === 'tariff') {
+    return ['Macro/Rates'];
+  }
+  return [];
+}
 
 interface RawSignal {
   market_id: string;
@@ -263,17 +321,20 @@ function normalizeSignal(
     gatedSignal.is_relevant &&
     (isAheadOfCurveDeterministic(market) || Boolean(gatedSignal.is_ahead_of_curve));
 
-  // Filter thematic buckets to the canonical set so typos/hallucinations don't
-  // leak into the DB and break the dashboard's group-by-bucket aggregation.
-  const cleanedBuckets = Array.isArray(gatedSignal.thematic_buckets)
-    ? Array.from(
-        new Set(
-          gatedSignal.thematic_buckets
-            .map((b) => String(b).trim())
-            .filter((b) => VALID_BUCKETS_SET.has(b))
-        )
-      )
+  // Filter LLM-supplied buckets to the canonical set so typos/hallucinations
+  // don't leak into the DB. Then merge with deterministic inference from the
+  // affected_stocks list and the signal_type — guarantees coverage even when
+  // the LLM forgets to fill the field.
+  const llmBuckets = Array.isArray(gatedSignal.thematic_buckets)
+    ? gatedSignal.thematic_buckets
+        .map((b) => String(b).trim())
+        .filter((b): b is ThematicBucket => VALID_BUCKETS_SET.has(b))
     : [];
+  const inferredFromStocks = inferBucketsFromStocks(gatedSignal.affected_stocks);
+  const inferredFromType = inferBucketsFromSignalType(gatedSignal.signal_type);
+  const cleanedBuckets = Array.from(
+    new Set<ThematicBucket>([...llmBuckets, ...inferredFromStocks, ...inferredFromType])
+  );
 
   return {
     market_id: gatedSignal.market_id,
@@ -523,18 +584,23 @@ TIER 3 — SMALLER POSITIONS (<$30M): CRCL, APLD, COHR, GLXY, NTSK — signals a
 
 A signal about IREN (Tier 1) should be MORE URGENT than a signal about NTSK (Tier 3), even if the event significance is similar. Position size is a multiplier on urgency. Pure-macro signals (Fed, tariffs, AI regulation) are high urgency by default because they affect the whole book.
 
-THEMATIC EXPOSURE TAGGING — return as an array on every relevant signal:
+THEMATIC EXPOSURE TAGGING — REQUIRED on every relevant signal, never empty:
 
-For each relevant signal, tag which BIT Capital thematic buckets it affects. Use these EXACT strings (case-sensitive):
-- "AI Infrastructure"  → IREN, NVDA, AMD, APLD, COHR (chip makers, data-center compute, mining infra)
-- "Big Tech Platforms" → MSFT, GOOGL, META, AAPL, AMZN
-- "Fintech"            → SOFI, LMND
-- "Digital Assets"     → IREN, CRCL, GLXY (crypto-adjacent equities and miners)
+For each relevant signal, tag which BIT Capital thematic buckets it affects. Pick ALL that apply from this EXACT list (case-sensitive, must match strings exactly):
+- "AI Infrastructure"  → IREN, NVDA, AMD, APLD, COHR (chips, GPUs, data-center compute, mining infra)
+- "Big Tech Platforms" → MSFT, GOOGL, META, AAPL, AMZN, RDDT
+- "Fintech"            → SOFI, LMND, HIMS, CRCL
+- "Digital Assets"     → IREN, CRCL, GLXY, BTC/ETH price markets, crypto ETFs
 - "Digital Health"     → HNGE, HIMS, LMND
 - "Cybersecurity"      → NTSK
-- "Macro/Rates"        → use this for Fed/rates/inflation/tariff/regulation events that affect the whole book
+- "Macro/Rates"        → Fed decisions, FOMC, tariffs, inflation prints, AI regulation, semiconductor export controls — anything that touches the whole book
 
-A single signal can affect multiple buckets (e.g. AI export controls hits "AI Infrastructure" AND "Macro/Rates"). Return an empty array only if not relevant.
+Rules:
+- A SINGLE signal frequently affects MULTIPLE buckets. A Fed rate decision is "Macro/Rates" AND should also include the equity buckets it most affects (typically "Big Tech Platforms" and "AI Infrastructure" for growth/duration-sensitive holdings).
+- AI export controls hit "AI Infrastructure" AND "Macro/Rates".
+- A SpaceX IPO question affects "Big Tech Platforms".
+- A Bitcoin price market is "Digital Assets" (and "Macro/Rates" if it's a 2025+ macro-driven move).
+- NEVER return an empty thematic_buckets array on a relevant signal. If nothing else fits, include "Macro/Rates" as a default — the portfolio is rate-sensitive across the board.
 
 AHEAD OF THE CURVE — set is_ahead_of_curve: true when:
 
@@ -617,6 +683,11 @@ export async function analyzeMarkets(limit = 36, sensitivity: Sensitivity = 'bal
     const signals = await analyzeBatch(batch, sensitivity);
     const rows = signals.map((signal) => ({
       ...signal,
+      // Explicit non-null guarantees for the BIT-Capital-specific columns —
+      // protects against the case where normalizeSignal returns undefined
+      // (the schema fallback would otherwise silently strip these).
+      thematic_buckets: signal.thematic_buckets ?? [],
+      is_ahead_of_curve: signal.is_ahead_of_curve ?? false,
       model: getOpenAIModel(),
       analyzed_at: new Date().toISOString(),
     }));
