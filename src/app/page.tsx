@@ -116,26 +116,54 @@ function calculateSignificance(signal: SignalRow): number {
   return (urgencyScore * 2) + (conviction * 2) + volumeScore + changeScore + confidence;
 }
 
+function formatNewMarketCount(count: number): string {
+  return `${count} new ${count === 1 ? 'market' : 'markets'}`;
+}
+
+function formatNewRelevantSignalCount(count: number): string {
+  return `${count} new relevant ${count === 1 ? 'signal' : 'signals'}`;
+}
+
+function formatTotalRelevantSignalCount(count: number): string {
+  return `${count} relevant ${count === 1 ? 'signal' : 'signals'}`;
+}
+
 async function runPipeline(onStep: (status: PipelineStatus, msg: string) => void) {
-  onStep('ingesting', 'Step 1/3 — Ingesting markets...');
+  onStep('ingesting', 'Step 1/3 — Fetching markets from Polymarket...');
   const ingestRes = await fetch('/api/ingest', { method: 'POST' });
   const ingestData = await ingestRes.json();
   if (!ingestData.success) throw new Error(ingestData.error ?? 'Ingest failed');
+  const fetchedCount = Number(ingestData.count ?? 0);
 
-  onStep('analyzing', `Step 2/3 — Analyzing ${ingestData.count} markets with LLM...`);
+  onStep('analyzing', `Step 2/3 — ${fetchedCount} markets fetched from Polymarket. Analyzing new markets with LLM...`);
   const sensitivity = (typeof window !== 'undefined' ? localStorage.getItem('filter_sensitivity') : null) ?? 'balanced';
   const analyzeRes = await fetch(`/api/analyze?sensitivity=${sensitivity}`, { method: 'POST' });
   const analyzeData = await analyzeRes.json();
   if (!analyzeData.success) throw new Error(analyzeData.error ?? 'Analyze failed');
+  const analyzedCount = Number(analyzeData.analyzed ?? 0);
+  const newRelevantCount = Number(analyzeData.relevant ?? 0);
 
-  if (analyzeData.relevant > 0) {
-    onStep('reporting', `Step 3/3 — Generating report for ${analyzeData.relevant} relevant signals...`);
+  if (newRelevantCount > 0) {
+    onStep('reporting', `Step 3/3 — Generating report for ${formatNewRelevantSignalCount(newRelevantCount)}...`);
     const reportRes = await fetch('/api/report', { method: 'POST' });
     const reportData = await reportRes.json();
     if (!reportData.success && !reportData.id) throw new Error(reportData.error ?? 'Report failed');
   }
 
-  onStep('done', `Done — ${ingestData.count} markets ingested, ${analyzeData.analyzed} analyzed, ${analyzeData.relevant} relevant signals found.`);
+  const { count: totalRelevantCount, error: totalRelevantError } = await supabase
+    .from('signals')
+    .select('*', { count: 'exact', head: true })
+    .eq('is_relevant', true);
+  if (totalRelevantError) throw new Error(totalRelevantError.message);
+  const totalRelevantSignals = totalRelevantCount ?? 0;
+  const analyzedMarketText = formatNewMarketCount(analyzedCount);
+
+  if (newRelevantCount === 0) {
+    onStep('done', `Done — Analyzed ${analyzedMarketText}, no new relevant signals found. Database holds ${totalRelevantSignals} total relevant ${totalRelevantSignals === 1 ? 'signal' : 'signals'}.`);
+    return;
+  }
+
+  onStep('done', `Done — Analyzed ${analyzedMarketText} this run, ${formatNewRelevantSignalCount(newRelevantCount)} added. Total: ${formatTotalRelevantSignalCount(totalRelevantSignals)} in database.`);
 }
 
 export default function Dashboard() {
