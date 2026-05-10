@@ -63,6 +63,7 @@ type MarketInfo = {
   question: string;
   probability: number;
   volume: number;
+  end_date?: string | null;
   slug?: string | null;
   market_url?: string | null;
 };
@@ -80,6 +81,45 @@ type SignalRow = {
   is_ahead_of_curve: boolean | null;
 };
 
+const MIN_ACTIONABLE_PROBABILITY = 0.05;
+const MAX_ACTIONABLE_PROBABILITY = 0.95;
+const RESOLVED_LOW_PROBABILITY = 0.03;
+const RESOLVED_HIGH_PROBABILITY = 0.97;
+const CONTESTED_LOW_PROBABILITY = 0.25;
+const CONTESTED_HIGH_PROBABILITY = 0.75;
+
+function getSignalMarket(signal: SignalRow): MarketInfo | null {
+  return Array.isArray(signal.markets) ? signal.markets[0] ?? null : signal.markets;
+}
+
+function hasExpired(endDate: string | null | undefined, now = Date.now()): boolean {
+  if (!endDate) return false;
+  const expiry = new Date(endDate).getTime();
+  return Number.isFinite(expiry) && expiry < now;
+}
+
+function isActionableTopSignal(signal: SignalRow, now = Date.now()): boolean {
+  const market = getSignalMarket(signal);
+  const probability = market?.probability;
+  if (typeof probability !== 'number' || !Number.isFinite(probability)) return false;
+  if (probability <= RESOLVED_LOW_PROBABILITY || probability >= RESOLVED_HIGH_PROBABILITY) return false;
+  if (probability <= MIN_ACTIONABLE_PROBABILITY || probability >= MAX_ACTIONABLE_PROBABILITY) return false;
+  return !hasExpired(market?.end_date, now);
+}
+
+function contestedProbabilityScore(probability: number): number {
+  if (probability >= CONTESTED_LOW_PROBABILITY && probability <= CONTESTED_HIGH_PROBABILITY) {
+    const centeredness = 1 - Math.abs(probability - 0.5) / (CONTESTED_HIGH_PROBABILITY - 0.5);
+    return 1 + centeredness; // 1 at 25%/75%, 2 at 50%.
+  }
+
+  const distanceToContestedRange = probability < CONTESTED_LOW_PROBABILITY
+    ? CONTESTED_LOW_PROBABILITY - probability
+    : probability - CONTESTED_HIGH_PROBABILITY;
+  const actionableEdgeWidth = CONTESTED_LOW_PROBABILITY - MIN_ACTIONABLE_PROBABILITY;
+  return Math.max(0, 1 - distanceToContestedRange / actionableEdgeWidth);
+}
+
 /**
  * Format a USD volume figure as a compact human-readable string.
  * Examples: 2_300_000 → "$2.3M", 50_000 → "$50K", 800 → "$800".
@@ -96,10 +136,10 @@ function calculateSignificance(signal: SignalRow): number {
   const urgencyScore = signal.urgency === 'high' ? 3 :
                        signal.urgency === 'medium' ? 2 : 1;
 
-  // Conviction weight: how extreme the probability is (closer to 0% or 100% = stronger)
-  const m = Array.isArray(signal.markets) ? signal.markets[0] : signal.markets;
-  const probability = m?.probability || 0.5;
-  const conviction = Math.abs(probability - 0.5) * 2; // 0 to 1
+  // Contested markets are more actionable than near-settled 0%/100% markets.
+  const m = getSignalMarket(signal);
+  const probability = m?.probability ?? 0.5;
+  const probabilityScore = contestedProbabilityScore(probability);
 
   // Volume credibility (log scale, 0 to 1)
   const volume = m?.volume || 0;
@@ -112,8 +152,8 @@ function calculateSignificance(signal: SignalRow): number {
   // Confidence from the LLM (0 to 1)
   const confidence = signal.confidence || 0.5;
 
-  // Weighted sum: urgency is most important, then conviction and confidence
-  return (urgencyScore * 2) + (conviction * 2) + volumeScore + changeScore + confidence;
+  // Weighted sum: urgency and active uncertainty matter most.
+  return (urgencyScore * 2) + (probabilityScore * 3) + volumeScore + changeScore + confidence;
 }
 
 function formatNewMarketCount(count: number): string {
@@ -251,14 +291,16 @@ export default function Dashboard() {
       // Fetch Top Signals — get relevant signals and sort by significance score
       const { data: top } = await supabase
         .from('signals')
-        .select('*, markets(id, question, probability, volume, slug, market_url)')
+        .select('*, markets(id, question, probability, volume, end_date, slug, market_url)')
         .eq('is_relevant', true)
         .order('analyzed_at', { ascending: false })
-        .limit(20); // Fetch more, sort by significance
+        .limit(100); // Fetch more because near-settled/expired markets are filtered client-side.
 
       if (top) {
         const signals = top as unknown as SignalRow[];
+        const now = Date.now();
         const sorted = [...signals]
+          .filter((signal) => isActionableTopSignal(signal, now))
           .sort((a, b) => calculateSignificance(b) - calculateSignificance(a))
           .slice(0, 5); // Take top 5 by significance
         setTopSignals(sorted);
@@ -486,11 +528,11 @@ export default function Dashboard() {
             <tbody className="divide-y divide-[#1f2937]">
               {topSignals.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-6 py-8 text-center">No highly relevant signals found.</td>
+                  <td colSpan={6} className="px-6 py-8 text-center">No actionable unresolved signals found.</td>
                 </tr>
               ) : (
                 topSignals.map((s) => {
-                  const m = Array.isArray(s.markets) ? s.markets[0] : s.markets;
+                  const m = getSignalMarket(s);
                   const prob = (m?.probability || 0) * 100;
                   const volume = m?.volume || 0;
                   const volumeLabel = formatVolume(volume);
