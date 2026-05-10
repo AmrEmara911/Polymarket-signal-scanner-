@@ -57,6 +57,20 @@ function netDirectionLabel(stats: BucketStats): {
 }
 
 type PipelineStatus = 'idle' | 'ingesting' | 'analyzing' | 'reporting' | 'done' | 'error';
+type LastPipelineRunStatus = 'running' | 'completed' | 'error';
+
+type LastPipelineRun = {
+  status: LastPipelineRunStatus;
+  ingested: number;
+  analyzed: number;
+  newRelevant: number;
+  totalRelevant: number;
+  completedAt: string;
+  message: string;
+};
+
+type PipelineRunCounts = Pick<LastPipelineRun, 'ingested' | 'analyzed' | 'newRelevant' | 'totalRelevant'>;
+type PipelineRunResult = PipelineRunCounts & { message: string };
 
 type MarketInfo = {
   id?: string;
@@ -87,6 +101,7 @@ const RESOLVED_LOW_PROBABILITY = 0.03;
 const RESOLVED_HIGH_PROBABILITY = 0.97;
 const CONTESTED_LOW_PROBABILITY = 0.25;
 const CONTESTED_HIGH_PROBABILITY = 0.75;
+const LAST_PIPELINE_RUN_KEY = 'lastPipelineRun';
 
 function getSignalMarket(signal: SignalRow): MarketInfo | null {
   return Array.isArray(signal.markets) ? signal.markets[0] ?? null : signal.markets;
@@ -168,23 +183,72 @@ function formatTotalRelevantSignalCount(count: number): string {
   return `${count} relevant ${count === 1 ? 'signal' : 'signals'}`;
 }
 
-async function runPipeline(onStep: (status: PipelineStatus, msg: string) => void) {
+function isActivePipelineStatus(status: PipelineStatus): boolean {
+  return ['ingesting', 'analyzing', 'reporting'].includes(status);
+}
+
+function toLastPipelineRunStatus(status: PipelineStatus): LastPipelineRunStatus {
+  if (status === 'error') return 'error';
+  if (status === 'done') return 'completed';
+  return 'running';
+}
+
+function readLastPipelineRun(): LastPipelineRun | null {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    const raw = localStorage.getItem(LAST_PIPELINE_RUN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<LastPipelineRun>;
+    if (!parsed.message || !parsed.completedAt) return null;
+    if (!['running', 'completed', 'error'].includes(String(parsed.status))) return null;
+
+    return {
+      status: parsed.status as LastPipelineRunStatus,
+      ingested: Number(parsed.ingested ?? 0),
+      analyzed: Number(parsed.analyzed ?? 0),
+      newRelevant: Number(parsed.newRelevant ?? 0),
+      totalRelevant: Number(parsed.totalRelevant ?? 0),
+      completedAt: parsed.completedAt,
+      message: parsed.message,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveLastPipelineRun(run: LastPipelineRun): void {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(LAST_PIPELINE_RUN_KEY, JSON.stringify(run));
+}
+
+async function runPipeline(
+  onStep: (status: PipelineStatus, msg: string, counts?: Partial<PipelineRunCounts>) => void
+): Promise<PipelineRunResult> {
+  let ingested = 0;
+  let analyzed = 0;
+  let newRelevant = 0;
+  let totalRelevant = 0;
+
   onStep('ingesting', 'Step 1/3 — Fetching markets from Polymarket...');
   const ingestRes = await fetch('/api/ingest', { method: 'POST' });
   const ingestData = await ingestRes.json();
   if (!ingestData.success) throw new Error(ingestData.error ?? 'Ingest failed');
-  const fetchedCount = Number(ingestData.count ?? 0);
+  ingested = Number(ingestData.count ?? 0);
+  const fetchedCount = ingested;
 
-  onStep('analyzing', `Step 2/3 — ${fetchedCount} markets fetched from Polymarket. Analyzing new markets with LLM...`);
+  onStep('analyzing', `Step 2/3 — ${fetchedCount} markets fetched from Polymarket. Analyzing new markets with LLM...`, { ingested });
   const sensitivity = (typeof window !== 'undefined' ? localStorage.getItem('filter_sensitivity') : null) ?? 'balanced';
   const analyzeRes = await fetch(`/api/analyze?sensitivity=${sensitivity}`, { method: 'POST' });
   const analyzeData = await analyzeRes.json();
   if (!analyzeData.success) throw new Error(analyzeData.error ?? 'Analyze failed');
   const analyzedCount = Number(analyzeData.analyzed ?? 0);
   const newRelevantCount = Number(analyzeData.relevant ?? 0);
+  analyzed = analyzedCount;
+  newRelevant = newRelevantCount;
 
   if (newRelevantCount > 0) {
-    onStep('reporting', `Step 3/3 — Generating report for ${formatNewRelevantSignalCount(newRelevantCount)}...`);
+    onStep('reporting', `Step 3/3 — Generating report for ${formatNewRelevantSignalCount(newRelevantCount)}...`, { ingested, analyzed, newRelevant });
     const reportRes = await fetch('/api/report', { method: 'POST' });
     const reportData = await reportRes.json();
     if (!reportData.success && !reportData.id) throw new Error(reportData.error ?? 'Report failed');
@@ -196,14 +260,46 @@ async function runPipeline(onStep: (status: PipelineStatus, msg: string) => void
     .eq('is_relevant', true);
   if (totalRelevantError) throw new Error(totalRelevantError.message);
   const totalRelevantSignals = totalRelevantCount ?? 0;
+  totalRelevant = totalRelevantSignals;
   const analyzedMarketText = formatNewMarketCount(analyzedCount);
 
   if (newRelevantCount === 0) {
-    onStep('done', `Done — Analyzed ${analyzedMarketText}, no new relevant signals found. Database holds ${totalRelevantSignals} total relevant ${totalRelevantSignals === 1 ? 'signal' : 'signals'}.`);
-    return;
+    onStep('done', `Done — Analyzed ${analyzedMarketText}, no new relevant signals found. Database holds ${totalRelevantSignals} total relevant ${totalRelevantSignals === 1 ? 'signal' : 'signals'}.`, {
+      ingested,
+      analyzed,
+      newRelevant,
+      totalRelevant,
+    });
+    return {
+      ingested,
+      analyzed,
+      newRelevant,
+      totalRelevant,
+      message: `Done — Analyzed ${analyzedMarketText}, no new relevant signals found. Database holds ${totalRelevantSignals} total relevant ${totalRelevantSignals === 1 ? 'signal' : 'signals'}.`,
+    };
   }
 
-  onStep('done', `Done — Analyzed ${analyzedMarketText} this run, ${formatNewRelevantSignalCount(newRelevantCount)} added. Total: ${formatTotalRelevantSignalCount(totalRelevantSignals)} in database.`);
+  if (newRelevantCount > 0) {
+    const message = `Done — Analyzed ${analyzedMarketText} this run, ${formatNewRelevantSignalCount(newRelevantCount)} added. Total: ${formatTotalRelevantSignalCount(totalRelevantSignals)} in database.`;
+    onStep('done', message, { ingested, analyzed, newRelevant, totalRelevant });
+    return {
+      ingested,
+      analyzed,
+      newRelevant,
+      totalRelevant,
+      message,
+    };
+  }
+
+  const message = `Done — Analyzed ${analyzedMarketText}. Total: ${formatTotalRelevantSignalCount(totalRelevantSignals)} in database.`;
+  onStep('done', message, { ingested, analyzed, newRelevant, totalRelevant });
+  return {
+    ingested,
+    analyzed,
+    newRelevant,
+    totalRelevant,
+    message,
+  };
 }
 
 export default function Dashboard() {
@@ -229,6 +325,7 @@ export default function Dashboard() {
     const id = setInterval(() => setTick((t) => t + 1), 30_000);
     return () => clearInterval(id);
   }, []);
+
   const [topSignals, setTopSignals] = useState<SignalRow[]>([]);
   // Bucket aggregates for the "Thematic Exposure Today" section. Computed
   // from ALL relevant signals, not just the top 5 in the table above.
@@ -240,11 +337,16 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>('idle');
   const [pipelineMessage, setPipelineMessage] = useState('');
+  const [lastPipelineRun, setLastPipelineRun] = useState<LastPipelineRun | null>(null);
   const [schedulerInfo, setSchedulerInfo] = useState<{
     schedule: string;
     next_run: string | null;
     last_run: string | null;
   }>({ schedule: 'Every 6 hours', next_run: null, last_run: null });
+
+  useEffect(() => {
+    setLastPipelineRun(readLastPipelineRun());
+  }, []);
 
   useEffect(() => {
     fetch('/api/scheduler')
@@ -346,18 +448,71 @@ export default function Dashboard() {
   }
 
   async function handleRunPipeline() {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem(LAST_PIPELINE_RUN_KEY);
+    }
+
+    let persistedRun: LastPipelineRun = {
+      status: 'running',
+      ingested: 0,
+      analyzed: 0,
+      newRelevant: 0,
+      totalRelevant: 0,
+      completedAt: new Date().toISOString(),
+      message: 'Starting pipeline...',
+    };
+
+    const persistRun = (run: LastPipelineRun) => {
+      persistedRun = run;
+      saveLastPipelineRun(run);
+      setLastPipelineRun(run);
+    };
+
     setPipelineStatus('ingesting');
     setPipelineMessage('Starting pipeline...');
+    persistRun(persistedRun);
+
     try {
-      await runPipeline((status, msg) => {
+      const result = await runPipeline((status, msg, counts) => {
         setPipelineStatus(status);
         setPipelineMessage(msg);
+        persistRun({
+          ...persistedRun,
+          ...counts,
+          status: toLastPipelineRunStatus(status),
+          completedAt: new Date().toISOString(),
+          message: msg,
+        });
       });
+      const completedRun: LastPipelineRun = {
+        status: 'completed',
+        ingested: result.ingested,
+        analyzed: result.analyzed,
+        newRelevant: result.newRelevant,
+        totalRelevant: result.totalRelevant,
+        completedAt: new Date().toISOString(),
+        message: result.message,
+      };
+      setPipelineStatus('done');
+      setPipelineMessage(result.message);
+      persistRun(completedRun);
     } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      const errorRun: LastPipelineRun = {
+        ...persistedRun,
+        status: 'error',
+        completedAt: new Date().toISOString(),
+        message,
+      };
       setPipelineStatus('error');
-      setPipelineMessage(err instanceof Error ? err.message : 'Unknown error');
+      setPipelineMessage(message);
+      persistRun(errorRun);
     }
   }
+
+  const isPipelineRunning = isActivePipelineStatus(pipelineStatus);
+  const bannerStatus = isPipelineRunning ? 'running' : lastPipelineRun?.status;
+  const bannerMessage = isPipelineRunning ? pipelineMessage : lastPipelineRun?.message;
 
   return (
     <div className="space-y-8">
@@ -366,10 +521,10 @@ export default function Dashboard() {
         <div className="flex flex-col items-end gap-2">
           <button
             onClick={handleRunPipeline}
-            disabled={['ingesting', 'analyzing', 'reporting'].includes(pipelineStatus)}
+            disabled={isPipelineRunning}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#3b82f6] hover:bg-[#2563eb] disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors"
           >
-            {['ingesting', 'analyzing', 'reporting'].includes(pipelineStatus) ? (
+            {isPipelineRunning ? (
               <>
                 <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
                 Running…
@@ -378,14 +533,17 @@ export default function Dashboard() {
               <>▶ Run Pipeline Now</>
             )}
           </button>
-          {pipelineMessage && (
-            <p className={`text-xs max-w-xs text-right ${
-              pipelineStatus === 'error' ? 'text-[#ef4444]' :
-              pipelineStatus === 'done'  ? 'text-[#10b981]' :
+          {bannerMessage && lastPipelineRun && (
+            <div className={`text-xs max-w-xs text-right ${
+              bannerStatus === 'error' ? 'text-[#ef4444]' :
+              bannerStatus === 'completed' ? 'text-[#10b981]' :
               'text-[#9ca3af]'
             }`}>
-              {pipelineMessage}
-            </p>
+              <p>{bannerMessage}</p>
+              <p className="mt-0.5 text-[#6b7280]">
+                Last pipeline ran {formatRelativeTime(lastPipelineRun.completedAt)}
+              </p>
+            </div>
           )}
           <div className="text-xs text-[#6b7280] text-right space-y-0.5">
             <p>🕐 <span className="text-[#9ca3af]">{schedulerInfo.schedule}</span></p>
@@ -440,10 +598,10 @@ export default function Dashboard() {
           </p>
           <button
             onClick={handleRunPipeline}
-            disabled={['ingesting', 'analyzing', 'reporting'].includes(pipelineStatus)}
+            disabled={isPipelineRunning}
             className="bg-[#3b82f6] hover:bg-[#2563eb] disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-3 rounded-lg font-medium transition-colors"
           >
-            {['ingesting', 'analyzing', 'reporting'].includes(pipelineStatus)
+            {isPipelineRunning
               ? 'Running…'
               : '▶ Run Your First Pipeline'}
           </button>
