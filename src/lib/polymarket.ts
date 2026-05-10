@@ -234,13 +234,15 @@ export async function fetchAndStoreMarkets(limit = 250): Promise<number> {
     recorded_at: fetchedAt,
   }));
 
-  const { error: snapError } = await supabase
+  const { error: snapError, count: snapshotInsertCount } = await supabase
     .from('probability_snapshots')
-    .insert(snapshots);
+    .insert(snapshots, { count: 'exact' });
 
   if (snapError) {
     // Non-fatal — log but don't block ingest
     console.warn('[Ingest] Snapshot insert warning:', snapError.message);
+  } else {
+    console.log(`[Snapshots] Inserted ${snapshotInsertCount ?? snapshots.length} probability snapshots`);
   }
 
   return markets.length;

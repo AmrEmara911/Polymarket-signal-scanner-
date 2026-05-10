@@ -86,6 +86,7 @@ type SignalRow = {
   id: string;
   markets: MarketInfo | MarketInfo[] | null;
   probability_change: number | null;
+  is_moving: boolean | null;
   affected_stocks: string[] | null;
   urgency: string | null;
   signal_type: string | null;
@@ -418,19 +419,13 @@ export default function Dashboard() {
       const { count: relevantFound } = await supabase.from('signals').select('*', { count: 'exact', head: true }).eq('is_relevant', true);
       const { count: highUrgency } = await supabase.from('signals').select('*', { count: 'exact', head: true }).eq('urgency', 'high');
 
-      // Count markets moving significantly (>10pp change in either direction).
+      // Count markets moving significantly (>5pp change in either direction).
       // NOTE: with `head: true` the response `data` is null — we MUST use `count`.
-      const { count: movingUpCount } = await supabase
+      const { count: movingCount } = await supabase
         .from('signals')
         .select('*', { count: 'exact', head: true })
         .eq('is_relevant', true)
-        .gt('probability_change', 0.10);
-      const { count: movingDownCount } = await supabase
-        .from('signals')
-        .select('*', { count: 'exact', head: true })
-        .eq('is_relevant', true)
-        .lt('probability_change', -0.10);
-      const movingCount = (movingUpCount ?? 0) + (movingDownCount ?? 0);
+        .eq('is_moving', true);
 
       const { data: latestSignal } = await supabase.from('signals').select('analyzed_at').order('analyzed_at', { ascending: false }).limit(1);
 
@@ -438,7 +433,7 @@ export default function Dashboard() {
         totalScanned: totalScanned || 0,
         relevantFound: relevantFound || 0,
         highUrgency: highUrgency || 0,
-        marketsMoving: movingCount,
+        marketsMoving: movingCount ?? 0,
         lastUpdatedAt: latestSignal?.[0]?.analyzed_at ?? null,
       });
 
@@ -711,7 +706,7 @@ export default function Dashboard() {
           <h3 className="text-sm font-medium text-[#9ca3af] mb-1 flex items-center gap-1.5">
             Markets Moving Today
             <span
-              title="Markets where probability has changed by more than 10 percentage points in the last 24 hours."
+              title="Markets where probability has changed by more than 5 percentage points in the last 24 hours."
               className="cursor-help text-[#6b7280] hover:text-[#9ca3af] transition-colors"
               aria-label="What counts as a moving market?"
             >

@@ -150,6 +150,7 @@ create index if not exists prob_snapshots_market_time_idx
   on probability_snapshots (market_id, recorded_at desc);
 
 alter table signals add column if not exists probability_change float;
+alter table signals add column if not exists is_moving boolean default false;
 
 create table if not exists config (
   key text primary key,

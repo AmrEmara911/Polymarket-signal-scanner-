@@ -50,6 +50,7 @@ interface MarketForAnalysis {
   candidate_reasons?: string[];
   candidate_noise?: string[];
   probability_change?: number | null; // vs 24h ago (fractional, e.g. 0.15 = +15pp)
+  is_moving?: boolean | null;
 }
 
 /** Canonical BIT Capital thematic buckets — also referenced in the LLM prompt. */
@@ -140,6 +141,7 @@ interface RawSignal {
   key_risks: string[];
   suggested_action: string;
   probability_change?: number | null; // set post-LLM from snapshot data
+  is_moving?: boolean | null;
   thematic_buckets?: string[]; // BIT Capital exposure tags
   is_ahead_of_curve?: boolean; // contested range + sharp move + credible vol
 }
@@ -309,6 +311,7 @@ function normalizeSignal(
 
   const gatedSignal = applyQualityGate(signal, market);
   const probChange = market.probability_change ?? null;
+  const isMoving = probChange !== null && Math.abs(probChange) > 0.05;
 
   // Movement detection: > 20pp change → force urgency to high
   const movementUrgencyOverride =
@@ -360,6 +363,7 @@ function normalizeSignal(
       : [],
     suggested_action: String(gatedSignal.suggested_action ?? '').slice(0, 700),
     probability_change: probChange,
+    is_moving: isMoving,
     thematic_buckets: cleanedBuckets,
     is_ahead_of_curve: aheadOfCurve,
   };
@@ -448,36 +452,68 @@ async function enrichWithProbabilityChanges(
 ): Promise<MarketForAnalysis[]> {
   if (!markets.length) return markets;
   const supabase = getSupabaseClient();
-  const now = new Date();
-  const t23h = new Date(now.getTime() - 23 * 60 * 60 * 1000);
-  const t25h = new Date(now.getTime() - 25 * 60 * 60 * 1000);
+  const targetTime = Date.now() - 24 * 60 * 60 * 1000;
   const ids = markets.map((m) => m.id);
 
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('probability_snapshots')
-    .select('market_id, probability')
+    .select('market_id, probability, recorded_at')
     .in('market_id', ids)
-    .lte('recorded_at', t23h.toISOString())
-    .gte('recorded_at', t25h.toISOString())
-    .order('recorded_at', { ascending: false });
+    .order('recorded_at', { ascending: true });
 
-  // Most-recent snapshot within the 23-25h window per market
-  const probAgo = new Map<string, number>();
-  const seen = new Set<string>();
-  for (const snap of (data ?? []) as { market_id: string; probability: number }[]) {
-    if (!seen.has(snap.market_id)) {
-      seen.add(snap.market_id);
-      probAgo.set(snap.market_id, snap.probability);
-    }
+  if (error) {
+    console.warn('[Movement] Snapshot fetch warning:', error.message);
+    return markets.map((market) => ({
+      ...market,
+      probability_change: null,
+      is_moving: false,
+    }));
   }
 
-  return markets.map((market) => ({
-    ...market,
-    probability_change:
-      probAgo.has(market.id) && market.probability != null
-        ? market.probability - probAgo.get(market.id)!
-        : null,
-  }));
+  const snapshotsByMarket = new Map<string, Array<{ probability: number; recorded_at: string }>>();
+  for (const snap of (data ?? []) as Array<{ market_id: string; probability: number; recorded_at: string }>) {
+    if (!Number.isFinite(Number(snap.probability))) continue;
+    const snapshots = snapshotsByMarket.get(snap.market_id) ?? [];
+    snapshots.push({ probability: Number(snap.probability), recorded_at: snap.recorded_at });
+    snapshotsByMarket.set(snap.market_id, snapshots);
+  }
+
+  let changedCount = 0;
+  let movingCount = 0;
+
+  const enriched = markets.map((market) => {
+    const snapshots = snapshotsByMarket.get(market.id) ?? [];
+    const latestBeforeTarget = snapshots
+      .filter((snapshot) => new Date(snapshot.recorded_at).getTime() <= targetTime)
+      .at(-1);
+    const baseline = latestBeforeTarget ?? snapshots[0] ?? null;
+    const change =
+      baseline && market.probability != null
+        ? Number(market.probability) - baseline.probability
+        : null;
+    const isMoving = change !== null && Math.abs(change) > 0.05;
+
+    if (change !== null) changedCount += 1;
+    if (isMoving) movingCount += 1;
+
+    return {
+      ...market,
+      probability_change: change,
+      is_moving: isMoving,
+    };
+  });
+
+  console.log(
+    `[Movement] Compared ${changedCount}/${markets.length} markets against ${data?.length ?? 0} snapshots; moving=${movingCount}`
+  );
+  const sample = enriched.find((market) => market.probability_change !== null);
+  if (sample) {
+    console.log(
+      `[Movement] Sample ${sample.id}: current=${sample.probability}, change=${sample.probability_change}`
+    );
+  }
+
+  return enriched;
 }
 
 async function fetchUnanalyzedMarkets(limit: number) {
@@ -517,6 +553,85 @@ async function fetchUnanalyzedMarkets(limit: number) {
     }));
 }
 
+async function refreshExistingSignalMovement(limit: number) {
+  const supabase = getSupabaseClient();
+  const { data: existingSignals, error: signalFetchError } = await supabase
+    .from('signals')
+    .select('market_id')
+    .not('market_id', 'is', null)
+    .limit(Math.max(limit * 25, 1000));
+
+  if (signalFetchError) {
+    console.warn('[Movement] Existing signal lookup warning:', signalFetchError.message);
+    return { updated: 0, moving: 0 };
+  }
+
+  const existingIds = new Set((existingSignals ?? []).map((signal) => signal.market_id));
+  if (existingIds.size === 0) {
+    console.log('[Movement] No existing signals available for movement refresh');
+    return { updated: 0, moving: 0 };
+  }
+
+  const { data: markets, error: marketFetchError } = await supabase
+    .from('markets')
+    .select('id, question, description, probability, volume, liquidity, category, end_date')
+    .in('id', Array.from(existingIds))
+    .eq('is_active', true);
+
+  if (marketFetchError) {
+    console.warn('[Movement] Existing signal market fetch warning:', marketFetchError.message);
+    return { updated: 0, moving: 0 };
+  }
+  if (!markets?.length) {
+    console.log('[Movement] No active markets available for existing signal movement refresh');
+    return { updated: 0, moving: 0 };
+  }
+
+  const enriched = await enrichWithProbabilityChanges(markets as MarketForAnalysis[]);
+  let updated = 0;
+  let moving = 0;
+  let warnedMissingIsMoving = false;
+
+  for (const market of enriched) {
+    if (!existingIds.has(market.id)) continue;
+    if (market.probability_change == null) continue;
+
+    const row = {
+      probability_change: market.probability_change,
+      is_moving: Boolean(market.is_moving),
+    };
+    const { error } = await supabase
+      .from('signals')
+      .update(row)
+      .eq('market_id', market.id);
+
+    if (error) {
+      const missingColumn = getMissingColumn(error.message);
+      if (missingColumn === 'is_moving') {
+        if (!warnedMissingIsMoving) {
+          console.warn('[Movement] signals.is_moving is missing; updating probability_change only');
+          warnedMissingIsMoving = true;
+        }
+        const { error: retryError } = await supabase
+          .from('signals')
+          .update({ probability_change: row.probability_change })
+          .eq('market_id', market.id);
+        if (retryError) {
+          throw new Error(`Supabase movement update error: ${retryError.message}`);
+        }
+      } else {
+        throw new Error(`Supabase movement update error: ${error.message}`);
+      }
+    }
+
+    updated += 1;
+    if (market.is_moving) moving += 1;
+  }
+
+  console.log(`[Movement] Refreshed probability_change for ${updated} existing signals; moving=${moving}`);
+  return { updated, moving };
+}
+
 export async function getAnalysisCandidates(limit = 20) {
   return fetchUnanalyzedMarkets(limit);
 }
@@ -538,7 +653,7 @@ async function analyzeBatch(markets: MarketForAnalysis[], sensitivity: Sensitivi
       market.probability_change != null
         ? Number((market.probability_change * 100).toFixed(1))
         : null,
-    is_moving: market.probability_change != null && Math.abs(market.probability_change) > 0.10,
+    is_moving: Boolean(market.is_moving),
     deterministic_candidate_score: market.candidate_score,
     deterministic_candidate_reasons: market.candidate_reasons,
     deterministic_noise_flags: market.candidate_noise,
@@ -668,6 +783,8 @@ Return exactly one signal object for each market. Use relevance_score >= 0.65 on
 
 export async function analyzeMarkets(limit = 36, sensitivity: Sensitivity = 'balanced'): Promise<AnalyzeResult> {
   console.log('[Filter] analyzeMarkets starting, model:', getOpenAIModel(), '| limit:', limit, '| sensitivity:', sensitivity);
+  const refreshed = await refreshExistingSignalMovement(limit);
+  console.log('[Movement] Existing signal refresh complete:', refreshed);
   const markets = await getAnalysisCandidates(limit);
   console.log('[Filter] Candidates to analyze:', markets.length, '| Sample:', markets[0]?.question ?? 'none');
   if (!markets.length) {
