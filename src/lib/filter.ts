@@ -5,6 +5,8 @@ import { callOpenAIJson, getOpenAIModel } from './openai';
 import { getSupabaseClient } from './supabase';
 
 const BATCH_SIZE = 12;
+const MOVEMENT_BASELINE_MIN_AGE_MS = 6 * 60 * 60 * 1000;
+const MOVEMENT_THRESHOLD = 0.05;
 
 export type Sensitivity = 'strict' | 'balanced' | 'broad';
 
@@ -311,7 +313,7 @@ function normalizeSignal(
 
   const gatedSignal = applyQualityGate(signal, market);
   const probChange = market.probability_change ?? null;
-  const isMoving = probChange !== null && Math.abs(probChange) > 0.05;
+  const isMoving = probChange !== null && Math.abs(probChange) > MOVEMENT_THRESHOLD;
 
   // Movement detection: > 20pp change → force urgency to high
   const movementUrgencyOverride =
@@ -452,49 +454,55 @@ async function enrichWithProbabilityChanges(
 ): Promise<MarketForAnalysis[]> {
   if (!markets.length) return markets;
   const supabase = getSupabaseClient();
-  const targetTime = Date.now() - 24 * 60 * 60 * 1000;
+  const cutoff = new Date(Date.now() - MOVEMENT_BASELINE_MIN_AGE_MS).toISOString();
   const ids = markets.map((m) => m.id);
 
   const { data, error } = await supabase
     .from('probability_snapshots')
     .select('market_id, probability, recorded_at')
     .in('market_id', ids)
-    .order('recorded_at', { ascending: true });
+    .lt('recorded_at', cutoff)
+    .order('recorded_at', { ascending: false });
 
   if (error) {
     console.warn('[Movement] Snapshot fetch warning:', error.message);
-    return markets.map((market) => ({
-      ...market,
-      probability_change: null,
-      is_moving: false,
-    }));
+    return markets.map((market) => {
+      console.log(
+        `[Filter] Market ${market.id}: previous=null, current=${market.probability ?? 'null'}, change=null`
+      );
+      return {
+        ...market,
+        probability_change: null,
+        is_moving: false,
+      };
+    });
   }
 
-  const snapshotsByMarket = new Map<string, Array<{ probability: number; recorded_at: string }>>();
+  const previousByMarket = new Map<string, number>();
   for (const snap of (data ?? []) as Array<{ market_id: string; probability: number; recorded_at: string }>) {
     if (!Number.isFinite(Number(snap.probability))) continue;
-    const snapshots = snapshotsByMarket.get(snap.market_id) ?? [];
-    snapshots.push({ probability: Number(snap.probability), recorded_at: snap.recorded_at });
-    snapshotsByMarket.set(snap.market_id, snapshots);
+    if (!previousByMarket.has(snap.market_id)) {
+      previousByMarket.set(snap.market_id, Number(snap.probability));
+    }
   }
 
   let changedCount = 0;
   let movingCount = 0;
 
   const enriched = markets.map((market) => {
-    const snapshots = snapshotsByMarket.get(market.id) ?? [];
-    const latestBeforeTarget = snapshots
-      .filter((snapshot) => new Date(snapshot.recorded_at).getTime() <= targetTime)
-      .at(-1);
-    const baseline = latestBeforeTarget ?? snapshots[0] ?? null;
+    const previous = previousByMarket.get(market.id) ?? null;
+    const current = market.probability != null ? Number(market.probability) : null;
     const change =
-      baseline && market.probability != null
-        ? Number(market.probability) - baseline.probability
+      previous !== null && current !== null
+        ? current - previous
         : null;
-    const isMoving = change !== null && Math.abs(change) > 0.05;
+    const isMoving = change !== null && Math.abs(change) > MOVEMENT_THRESHOLD;
 
     if (change !== null) changedCount += 1;
     if (isMoving) movingCount += 1;
+    console.log(
+      `[Filter] Market ${market.id}: previous=${previous ?? 'null'}, current=${current ?? 'null'}, change=${change ?? 'null'}`
+    );
 
     return {
       ...market,
@@ -504,7 +512,7 @@ async function enrichWithProbabilityChanges(
   });
 
   console.log(
-    `[Movement] Compared ${changedCount}/${markets.length} markets against ${data?.length ?? 0} snapshots; moving=${movingCount}`
+    `[Movement] Compared ${changedCount}/${markets.length} markets against ${data?.length ?? 0} snapshots older than ${cutoff}; moving=${movingCount}`
   );
   const sample = enriched.find((market) => market.probability_change !== null);
   if (sample) {

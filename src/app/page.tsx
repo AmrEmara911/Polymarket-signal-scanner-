@@ -421,11 +421,14 @@ export default function Dashboard() {
 
       // Count markets moving significantly (>5pp change in either direction).
       // NOTE: with `head: true` the response `data` is null — we MUST use `count`.
-      const { count: movingCount } = await supabase
+      const { count: movingCount, error: movingCountError } = await supabase
         .from('signals')
         .select('*', { count: 'exact', head: true })
-        .eq('is_relevant', true)
         .eq('is_moving', true);
+      if (movingCountError) {
+        console.warn('[Dashboard] Movement count error:', movingCountError.message);
+      }
+      console.log(`[Dashboard] Movement count: ${movingCount ?? 0}`);
 
       const { data: latestSignal } = await supabase.from('signals').select('analyzed_at').order('analyzed_at', { ascending: false }).limit(1);
 
