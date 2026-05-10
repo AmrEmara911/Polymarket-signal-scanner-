@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import jsPDF from 'jspdf';
 import ReactMarkdown from 'react-markdown';
 import { supabase } from '@/lib/supabase';
 import { resolveMarketUrl } from '@/components/MarketLink';
@@ -13,15 +14,175 @@ interface MarketRef {
   market_url: string | null;
 }
 
-export default function ReportsPage() {
-  interface ReportRow {
-    id: string;
-    generated_at: string;
-    content: string;
-    signal_count: number;
-    market_ids: string[] | null;
+interface ReportRow {
+  id: string;
+  generated_at: string;
+  content: string;
+  signal_count: number;
+  market_ids: string[] | null;
+}
+
+type PdfFontStyle = 'normal' | 'bold' | 'italic';
+
+function parseInlineMarkdown(text: string): Array<{ text: string; style: PdfFontStyle }> {
+  const segments: Array<{ text: string; style: PdfFontStyle }> = [];
+  let i = 0;
+
+  while (i < text.length) {
+    if (text.startsWith('**', i)) {
+      const end = text.indexOf('**', i + 2);
+      if (end !== -1) {
+        segments.push({ text: text.slice(i + 2, end), style: 'bold' });
+        i = end + 2;
+        continue;
+      }
+    }
+
+    if (text[i] === '*') {
+      const end = text.indexOf('*', i + 1);
+      if (end !== -1) {
+        segments.push({ text: text.slice(i + 1, end), style: 'italic' });
+        i = end + 1;
+        continue;
+      }
+    }
+
+    const nextMarker = text.indexOf('*', i);
+    const end = nextMarker === -1 ? text.length : nextMarker;
+    if (end === i) {
+      segments.push({ text: text[i], style: 'normal' });
+      i += 1;
+      continue;
+    }
+    segments.push({ text: text.slice(i, end), style: 'normal' });
+    i = end;
   }
 
+  return segments.filter((segment) => segment.text.length > 0);
+}
+
+function downloadPDF(report: ReportRow) {
+  const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 50;
+  const contentWidth = pageWidth - margin * 2;
+  const footerY = pageHeight - 30;
+  let y = margin;
+
+  const ensurePageSpace = (needed: number) => {
+    if (y + needed > pageHeight - 60) {
+      doc.addPage();
+      y = margin;
+    }
+  };
+
+  const renderStyledLine = (line: string, indent = 0) => {
+    const segments = parseInlineMarkdown(line);
+    const lineHeight = 14;
+    let x = margin + indent;
+
+    doc.setFontSize(10);
+    doc.setTextColor(15, 23, 42);
+    ensurePageSpace(lineHeight);
+
+    for (const segment of segments) {
+      doc.setFont('helvetica', segment.style);
+      const tokens = segment.text.split(/(\s+)/).filter(Boolean);
+
+      for (const token of tokens) {
+        if (!token.trim() && x === margin + indent) continue;
+        const tokenWidth = doc.getTextWidth(token);
+        if (token.trim() && x + tokenWidth > pageWidth - margin) {
+          y += lineHeight;
+          ensurePageSpace(lineHeight);
+          x = margin + indent;
+        }
+        doc.text(token, x, y);
+        x += tokenWidth;
+      }
+    }
+
+    y += lineHeight;
+  };
+
+  const renderHeading = (text: string, fontSize: number, lineHeight: number, topGap: number) => {
+    y += topGap;
+    ensurePageSpace(lineHeight * 2);
+    doc.setFontSize(fontSize);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(15, 23, 42);
+    const wrapped = doc.splitTextToSize(text, contentWidth);
+    doc.text(wrapped, margin, y);
+    y += wrapped.length * lineHeight + 4;
+  };
+
+  doc.setFillColor(15, 23, 42);
+  doc.rect(0, 0, pageWidth, 80, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(20);
+  doc.setFont('helvetica', 'bold');
+  doc.text('BIT Capital', margin, 40);
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(148, 163, 184);
+  doc.text('SIGNAL SCANNER', margin, 58);
+
+  doc.setTextColor(15, 23, 42);
+  y = 110;
+
+  doc.setFontSize(18);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Signal Briefing', margin, y);
+  y += 25;
+
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(100, 116, 139);
+  doc.text(`Generated ${new Date(report.generated_at).toLocaleString()}`, margin, y);
+  doc.text(`${report.signal_count} markets analyzed`, pageWidth - margin, y, { align: 'right' });
+  y += 30;
+
+  doc.setTextColor(15, 23, 42);
+
+  const lines = report.content.split('\n');
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+
+    if (line.startsWith('# ')) {
+      renderHeading(line.replace(/^#\s+/, ''), 16, 20, 10);
+    } else if (line.startsWith('## ')) {
+      renderHeading(line.replace(/^##\s+/, ''), 13, 17, 8);
+    } else if (line.startsWith('### ')) {
+      renderHeading(line.replace(/^###\s+/, ''), 11, 15, 6);
+    } else if (line.trim() === '---') {
+      ensurePageSpace(14);
+      doc.setDrawColor(203, 213, 225);
+      doc.line(margin, y, pageWidth - margin, y);
+      y += 14;
+    } else if (line.trim() === '') {
+      y += 6;
+    } else if (/^[-+]\s+/.test(line)) {
+      renderStyledLine(`- ${line.replace(/^[-+]\s+/, '')}`, 12);
+    } else {
+      renderStyledLine(line);
+    }
+  }
+
+  const pageCount = doc.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i += 1) {
+    doc.setPage(i);
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(148, 163, 184);
+    doc.text(`BIT Capital Signal Scanner — Page ${i} of ${pageCount}`, margin, footerY);
+  }
+
+  doc.save(`bit-capital-briefing-${new Date(report.generated_at).toISOString().split('T')[0]}.pdf`);
+}
+
+export default function ReportsPage() {
   const [reports, setReports] = useState<ReportRow[]>([]);
   // Map: market_id -> { question, market_url } for rendering source links
   const [marketLookup, setMarketLookup] = useState<Map<string, MarketRef>>(new Map());
@@ -87,37 +248,6 @@ export default function ReportsPage() {
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     alert('Copied to clipboard!');
-  };
-
-  const downloadPDF = async (reportId: string, content: string, generatedAt: string) => {
-    const element = document.getElementById(`report-${reportId}`);
-    if (!element || !content) {
-      setError('Report content is not available for PDF export.');
-      return;
-    }
-    setError(null);
-
-    const filename = `bit-capital-signal-briefing-${
-      new Date(generatedAt).toISOString().split('T')[0]
-    }.pdf`;
-
-    const { default: html2pdf } = await import('html2pdf.js');
-
-    const pdfOptions: {
-      filename: string;
-      margin: number;
-      pagebreak: { mode: string };
-      html2canvas: { backgroundColor: string };
-      jsPDF: { format: string; orientation: 'portrait' };
-    } = {
-      filename,
-      margin: 15,
-      pagebreak: { mode: 'avoid-all' },
-      html2canvas: { backgroundColor: '#0a0f1e' },
-      jsPDF: { format: 'a4', orientation: 'portrait' },
-    };
-
-    html2pdf().set(pdfOptions).from(element).save();
   };
 
   if (loading) {
@@ -193,7 +323,7 @@ export default function ReportsPage() {
                   Copy
                 </button>
                 <button
-                  onClick={() => downloadPDF(r.id, r.content, r.generated_at)}
+                  onClick={() => downloadPDF(r)}
                   className="text-[#9ca3af] hover:text-white transition-colors text-sm flex items-center gap-1"
                 >
                   <svg
