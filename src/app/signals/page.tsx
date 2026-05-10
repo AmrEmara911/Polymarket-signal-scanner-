@@ -210,6 +210,7 @@ export default function SignalsPage() {
           <table className="w-full text-left text-sm text-[#9ca3af]">
             <thead className="bg-[#0a0f1e] text-[#9ca3af] uppercase font-semibold text-xs border-b border-[#1f2937]">
               <tr>
+                <th className="w-10 px-3 py-4 text-slate-500">#</th>
                 <th className="px-6 py-4 w-1/3">Market Question</th>
                 <th className="px-4 py-4">Prob (24H)</th>
                 <th className="px-4 py-4">Trend</th>
@@ -222,7 +223,7 @@ export default function SignalsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-[#1f2937]">
-              {filteredSignals.map(s => {
+              {filteredSignals.map((s, index) => {
                 const m = Array.isArray(s.markets) ? s.markets[0] : s.markets;
                 const question = m?.question || 'Untitled market';
                 const reason = s.reason || 'No analysis reason available.';
@@ -237,6 +238,9 @@ export default function SignalsPage() {
                       onClick={() => setExpandedId(isExpanded ? null : s.id)}
                       className="transition-colors duration-150 hover:bg-slate-800/70 cursor-pointer"
                     >
+                      <td className="w-10 px-3 py-4 text-xs text-slate-500">
+                        {index + 1}
+                      </td>
                       <td className="px-6 py-4">
                         <div className="max-w-[360px]">
                           <div className="flex items-center gap-2">
@@ -330,7 +334,7 @@ export default function SignalsPage() {
                     {/* Expanded Row Content */}
                     {isExpanded && (
                       <tr className="bg-[#0a0f1e]/50">
-                        <td colSpan={9} className="px-6 py-6 border-l-2 border-[#3b82f6]">
+                        <td colSpan={10} className="px-6 py-6 border-l-2 border-[#3b82f6]">
                           <div className="grid grid-cols-2 gap-8 text-sm">
                             <div>
                               <h4 className="font-semibold text-white mb-2">Market Details</h4>
