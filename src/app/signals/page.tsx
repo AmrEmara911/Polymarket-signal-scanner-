@@ -5,7 +5,8 @@ import { supabase } from '@/lib/supabase';
 import { DirectionBadge } from '@/components/DirectionBadge';
 import { ProbChangeBadge } from '@/components/ProbChangeBadge';
 import { MarketLinkIcon, MarketLinkButton, resolveMarketUrl } from '@/components/MarketLink';
-import { Sparkline } from '@/components/Sparkline';
+// NOTE: <Sparkline /> import removed — TREND column hidden pending reliable
+// snapshot history. The component file still exists for re-enable later.
 import { AheadOfCurveBadge } from '@/components/AheadOfCurveBadge';
 import { formatRelativeTime, formatFullTimestamp } from '@/lib/format-time';
 
@@ -48,17 +49,14 @@ type SignalRow = {
 
 export default function SignalsPage() {
   const [signals, setSignals] = useState<SignalRow[]>([]);
-  // Map: market_id → ordered probability series (oldest → newest), last 7 days.
-  // Populated in one batched query after signals load to avoid N+1.
-  const [trendByMarket, setTrendByMarket] = useState<Map<string, number[]>>(new Map());
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  // Filters
+  // Filters — Movement filter removed pending reliable probability_change
+  // detection across ingest cycles.
   const [filterRelevant, setFilterRelevant] = useState<'all' | 'relevant'>('relevant');
   const [filterUrgency, setFilterUrgency] = useState('All');
   const [filterType, setFilterType] = useState('All');
-  const [filterMovement, setFilterMovement] = useState('All');
   const [search, setSearch] = useState('');
 
   useEffect(() => {
@@ -84,39 +82,8 @@ export default function SignalsPage() {
       const rows = (signalData ?? []) as unknown as SignalRow[];
       setSignals(rows);
       setLoading(false);
-
-      // Batched fetch for 7-day trend sparklines. One query, grouped client-side
-      // by market_id — no N+1 even with hundreds of signals.
-      const marketIds = Array.from(
-        new Set(
-          rows
-            .map((r) => (Array.isArray(r.markets) ? r.markets[0]?.id : r.markets?.id))
-            .filter((v): v is string => Boolean(v))
-        )
-      );
-      if (marketIds.length > 0) {
-        const sevenDaysAgoIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-        const { data: snaps, error: snapErr } = await supabase
-          .from('probability_snapshots')
-          .select('market_id, probability, recorded_at')
-          .in('market_id', marketIds)
-          .gte('recorded_at', sevenDaysAgoIso)
-          .order('recorded_at', { ascending: true });
-
-        if (snapErr) {
-          console.error('[Signals] Snapshot fetch error:', snapErr.message);
-        } else {
-          const byMarket = new Map<string, number[]>();
-          for (const s of (snaps ?? []) as Array<{ market_id: string; probability: number }>) {
-            const existing = byMarket.get(s.market_id);
-            const value = Number(s.probability);
-            if (!Number.isFinite(value)) continue;
-            if (existing) existing.push(value);
-            else byMarket.set(s.market_id, [value]);
-          }
-          setTrendByMarket(byMarket);
-        }
-      }
+      // NOTE: 7-day snapshot fetch for sparklines removed alongside the TREND
+      // column. Re-enable when probability snapshot history is reliable.
     }
     fetchSignals();
   }, []);
@@ -126,9 +93,6 @@ export default function SignalsPage() {
     if (filterRelevant === 'relevant' && !s.is_relevant) return false;
     if (filterUrgency !== 'All' && s.urgency?.toLowerCase() !== filterUrgency.toLowerCase()) return false;
     if (filterType !== 'All' && s.signal_type?.toLowerCase() !== filterType.toLowerCase()) return false;
-    if (filterMovement === 'Moving Up Only' && (!s.probability_change || s.probability_change <= 0.10)) return false;
-    if (filterMovement === 'Moving Down Only' && (!s.probability_change || s.probability_change >= -0.10)) return false;
-    if (filterMovement === 'Stable Only' && s.probability_change && Math.abs(s.probability_change) >= 0.05) return false;
     if (search && !m?.question?.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
@@ -179,17 +143,6 @@ export default function SignalsPage() {
           <option value="Sector">Sector</option>
         </select>
 
-        <select
-          value={filterMovement}
-          onChange={(e) => setFilterMovement(e.target.value)}
-          className="bg-[#0a0f1e] border border-[#1f2937] rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-[#3b82f6]"
-        >
-          <option value="All">All Movement</option>
-          <option value="Moving Up Only">Moving Up Only</option>
-          <option value="Moving Down Only">Moving Down Only</option>
-          <option value="Stable Only">Stable Only</option>
-        </select>
-
         <div className="ml-auto text-sm text-[#9ca3af]">
           Showing {filteredSignals.length} results
         </div>
@@ -203,7 +156,7 @@ export default function SignalsPage() {
           <div className="text-center py-16">
             <p className="text-[#9ca3af] mb-2">No signals match your filters</p>
             <p className="text-[#6b7280] text-sm">
-              Try changing the urgency, type, or movement filters above
+              Try changing the urgency or type filters above
             </p>
           </div>
         ) : (
@@ -213,7 +166,6 @@ export default function SignalsPage() {
                 <th className="w-10 px-3 py-4 text-slate-500">#</th>
                 <th className="px-6 py-4 w-1/3">Market Question</th>
                 <th className="px-4 py-4">Prob (24H)</th>
-                <th className="px-4 py-4">Trend</th>
                 <th className="px-4 py-4">Relevant</th>
                 <th className="px-4 py-4">Confidence</th>
                 <th className="px-4 py-4">Signal Type</th>
@@ -278,9 +230,6 @@ export default function SignalsPage() {
                           <ProbChangeBadge change={s.probability_change} />
                         </div>
                       </td>
-                      <td className="px-4 py-4 w-[80px]">
-                        <Sparkline data={(m?.id && trendByMarket.get(m.id)) || []} />
-                      </td>
                       <td className="px-4 py-4">
                         {s.is_relevant ? (
                           <span className="text-[#10b981] font-bold">✓</span>
@@ -334,7 +283,7 @@ export default function SignalsPage() {
                     {/* Expanded Row Content */}
                     {isExpanded && (
                       <tr className="bg-[#0a0f1e]/50">
-                        <td colSpan={10} className="px-6 py-6 border-l-2 border-[#3b82f6]">
+                        <td colSpan={9} className="px-6 py-6 border-l-2 border-[#3b82f6]">
                           <div className="grid grid-cols-2 gap-8 text-sm">
                             <div>
                               <h4 className="font-semibold text-white mb-2">Market Details</h4>

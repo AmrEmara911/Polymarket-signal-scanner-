@@ -352,7 +352,6 @@ export default function Dashboard() {
     totalScanned: number;
     relevantFound: number;
     highUrgency: number;
-    marketsMoving: number;
     /** ISO string of the most recent signal, or null. Formatted on render so
      *  the relative time stays fresh as the page sits open. */
     lastUpdatedAt: string | null;
@@ -360,7 +359,6 @@ export default function Dashboard() {
     totalScanned: 0,
     relevantFound: 0,
     highUrgency: 0,
-    marketsMoving: 0,
     lastUpdatedAt: null,
   });
   // Tick state: bumped every 30s so any formatRelativeTime() call below
@@ -419,16 +417,9 @@ export default function Dashboard() {
       const { count: relevantFound } = await supabase.from('signals').select('*', { count: 'exact', head: true }).eq('is_relevant', true);
       const { count: highUrgency } = await supabase.from('signals').select('*', { count: 'exact', head: true }).eq('urgency', 'high');
 
-      // Count markets moving significantly (>5pp change in either direction).
-      // NOTE: with `head: true` the response `data` is null — we MUST use `count`.
-      const { count: movingCount, error: movingCountError } = await supabase
-        .from('signals')
-        .select('*', { count: 'exact', head: true })
-        .eq('is_moving', true);
-      if (movingCountError) {
-        console.warn('[Dashboard] Movement count error:', movingCountError.message);
-      }
-      console.log(`[Dashboard] Movement count: ${movingCount ?? 0}`);
+      // NOTE: "Markets Moving Today" metric was removed — probability_change /
+      // is_moving detection isn't reliable across ingest cycles yet. The
+      // columns remain in the schema; revisit post-launch.
 
       const { data: latestSignal } = await supabase.from('signals').select('analyzed_at').order('analyzed_at', { ascending: false }).limit(1);
 
@@ -436,7 +427,6 @@ export default function Dashboard() {
         totalScanned: totalScanned || 0,
         relevantFound: relevantFound || 0,
         highUrgency: highUrgency || 0,
-        marketsMoving: movingCount ?? 0,
         lastUpdatedAt: latestSignal?.[0]?.analyzed_at ?? null,
       });
 
@@ -687,8 +677,9 @@ export default function Dashboard() {
         </div>
       ) : (
         <>
-      {/* Metrics Row */}
-      <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+      {/* Metrics Row — "Markets Moving Today" removed pending reliable
+          probability-change detection across ingest cycles. */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         {/* 1. Total Markets Scanned */}
         <div className="bg-[#111827] border border-[#1f2937] p-5 rounded-xl shadow-sm">
           <h3 className="text-sm font-medium text-[#9ca3af] mb-1">Total Markets Scanned</h3>
@@ -704,29 +695,7 @@ export default function Dashboard() {
           <h3 className="text-sm font-medium text-[#9ca3af] mb-1">High Urgency Signals</h3>
           <p className="font-bold text-3xl text-[#ef4444]">{metrics.highUrgency}</p>
         </div>
-        {/* 4. Markets Moving Today — special handling for the no-data-yet case */}
-        <div className="bg-[#111827] border border-[#1f2937] p-5 rounded-xl shadow-sm">
-          <h3 className="text-sm font-medium text-[#9ca3af] mb-1 flex items-center gap-1.5">
-            Markets Moving Today
-            <span
-              title="Markets where probability has changed by more than 5 percentage points in the last 24 hours."
-              className="cursor-help text-[#6b7280] hover:text-[#9ca3af] transition-colors"
-              aria-label="What counts as a moving market?"
-            >
-              {/* lucide `info` */}
-              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-            </span>
-          </h3>
-          {metrics.marketsMoving > 0 ? (
-            <p className="font-bold text-3xl text-[#f59e0b]">{metrics.marketsMoving}</p>
-          ) : (
-            <>
-              <p className="font-bold text-3xl text-[#6b7280]">—</p>
-              <p className="text-xs text-[#6b7280] mt-1">Tracking begins after 2nd run</p>
-            </>
-          )}
-        </div>
-        {/* 5. Last Updated — relative time, full timestamp on hover, auto-refreshes every 30s */}
+        {/* 4. Last Updated — relative time, full timestamp on hover, auto-refreshes every 30s */}
         <div className="bg-[#111827] border border-[#1f2937] p-5 rounded-xl shadow-sm">
           <h3 className="text-sm font-medium text-[#9ca3af] mb-1">Last Updated</h3>
           {metrics.lastUpdatedAt ? (
