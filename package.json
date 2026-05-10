@@ -13,6 +13,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.105.3",
     "@tailwindcss/typography": "^0.5.19",
+    "html2pdf.js": "^0.14.0",
     "next": "14.2.35",
     "node-cron": "^4.2.1",
     "openai": "^6.36.0",

@@ -89,6 +89,37 @@ export default function ReportsPage() {
     alert('Copied to clipboard!');
   };
 
+  const downloadPDF = async (reportId: string, content: string, generatedAt: string) => {
+    const element = document.getElementById(`report-${reportId}`);
+    if (!element || !content) {
+      setError('Report content is not available for PDF export.');
+      return;
+    }
+    setError(null);
+
+    const filename = `bit-capital-signal-briefing-${
+      new Date(generatedAt).toISOString().split('T')[0]
+    }.pdf`;
+
+    const { default: html2pdf } = await import('html2pdf.js');
+
+    const pdfOptions: {
+      filename: string;
+      margin: number;
+      pagebreak: { mode: string };
+      html2canvas: { backgroundColor: string };
+      jsPDF: { format: string; orientation: 'portrait' };
+    } = {
+      filename,
+      margin: 15,
+      pagebreak: { mode: 'avoid-all' },
+      html2canvas: { backgroundColor: '#0a0f1e' },
+      jsPDF: { format: 'a4', orientation: 'portrait' },
+    };
+
+    html2pdf().set(pdfOptions).from(element).save();
+  };
+
   if (loading) {
     return <div className="animate-pulse text-[#9ca3af]">Loading reports...</div>;
   }
@@ -135,7 +166,11 @@ export default function ReportsPage() {
         </div>
       ) : (
         reports.map(r => (
-          <div key={r.id} className="bg-[#111827] border border-[#1f2937] rounded-xl shadow-sm overflow-hidden">
+          <div
+            key={r.id}
+            id={`report-${r.id}`}
+            className="bg-[#111827] border border-[#1f2937] rounded-xl shadow-sm overflow-hidden"
+          >
             <div className="bg-[#0a0f1e] px-6 py-4 border-b border-[#1f2937] flex justify-between items-center">
               <div>
                 <span className="text-[#9ca3af] text-sm font-medium">Generated </span>
@@ -156,6 +191,27 @@ export default function ReportsPage() {
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                   Copy
+                </button>
+                <button
+                  onClick={() => downloadPDF(r.id, r.content, r.generated_at)}
+                  className="text-[#9ca3af] hover:text-white transition-colors text-sm flex items-center gap-1"
+                >
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" x2="12" y1="15" y2="3" />
+                  </svg>
+                  Download as PDF
                 </button>
               </div>
             </div>
