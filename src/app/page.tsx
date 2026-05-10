@@ -102,6 +102,11 @@ const RESOLVED_HIGH_PROBABILITY = 0.97;
 const CONTESTED_LOW_PROBABILITY = 0.25;
 const CONTESTED_HIGH_PROBABILITY = 0.75;
 const LAST_PIPELINE_RUN_KEY = 'lastPipelineRun';
+const PIPELINE_STEP_ESTIMATES: Record<Extract<PipelineStatus, 'ingesting' | 'analyzing' | 'reporting'>, number> = {
+  ingesting: 10,
+  analyzing: 30,
+  reporting: 10,
+};
 
 function getSignalMarket(signal: SignalRow): MarketInfo | null {
   return Array.isArray(signal.markets) ? signal.markets[0] ?? null : signal.markets;
@@ -222,6 +227,45 @@ function saveLastPipelineRun(run: LastPipelineRun): void {
   localStorage.setItem(LAST_PIPELINE_RUN_KEY, JSON.stringify(run));
 }
 
+function getPipelineEstimateSeconds(status: PipelineStatus): number {
+  if (status === 'ingesting' || status === 'analyzing' || status === 'reporting') {
+    return PIPELINE_STEP_ESTIMATES[status];
+  }
+  return 0;
+}
+
+function formatPipelineProgressMessage(status: PipelineStatus, secondsRemaining: number): string {
+  const seconds = Math.max(0, secondsRemaining);
+  if (status === 'ingesting') return `Step 1/3 — Fetching from Polymarket... ~${seconds}s`;
+  if (status === 'analyzing') return `Step 2/3 — Analyzing with LLM... ~${seconds}s remaining`;
+  if (status === 'reporting') return `Step 3/3 — Almost done... ~${seconds}s`;
+  return '';
+}
+
+function getPipelineProgressPercent(status: PipelineStatus): number {
+  if (status === 'ingesting') return 8;
+  if (status === 'analyzing') return 40;
+  if (status === 'reporting') return 75;
+  if (status === 'done') return 100;
+  return 0;
+}
+
+function formatDuration(seconds: number): string {
+  const rounded = Math.max(1, Math.round(seconds));
+  return `${rounded} ${rounded === 1 ? 'second' : 'seconds'}`;
+}
+
+function formatPipelineCompletionMessage(result: PipelineRunResult, elapsedSeconds: number): string {
+  const elapsed = formatDuration(elapsedSeconds);
+  const analyzedMarketText = formatNewMarketCount(result.analyzed);
+
+  if (result.newRelevant === 0) {
+    return `Done in ${elapsed} — Analyzed ${analyzedMarketText}, no new relevant signals found. Database holds ${result.totalRelevant} total relevant ${result.totalRelevant === 1 ? 'signal' : 'signals'}.`;
+  }
+
+  return `Done in ${elapsed} — Analyzed ${analyzedMarketText} this run, ${formatNewRelevantSignalCount(result.newRelevant)} added. Total: ${formatTotalRelevantSignalCount(result.totalRelevant)} in database.`;
+}
+
 async function runPipeline(
   onStep: (status: PipelineStatus, msg: string, counts?: Partial<PipelineRunCounts>) => void
 ): Promise<PipelineRunResult> {
@@ -336,7 +380,7 @@ export default function Dashboard() {
   );
   const [loading, setLoading] = useState(true);
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>('idle');
-  const [pipelineMessage, setPipelineMessage] = useState('');
+  const [secondsRemaining, setSecondsRemaining] = useState(60);
   const [lastPipelineRun, setLastPipelineRun] = useState<LastPipelineRun | null>(null);
   const [schedulerInfo, setSchedulerInfo] = useState<{
     schedule: string;
@@ -347,6 +391,14 @@ export default function Dashboard() {
   useEffect(() => {
     setLastPipelineRun(readLastPipelineRun());
   }, []);
+
+  useEffect(() => {
+    if (!isActivePipelineStatus(pipelineStatus)) return;
+    const id = setInterval(() => {
+      setSecondsRemaining((seconds) => Math.max(0, seconds - 1));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [pipelineStatus]);
 
   useEffect(() => {
     fetch('/api/scheduler')
@@ -452,6 +504,9 @@ export default function Dashboard() {
       localStorage.removeItem(LAST_PIPELINE_RUN_KEY);
     }
 
+    const startedAt = Date.now();
+    const initialEstimate = getPipelineEstimateSeconds('ingesting');
+    const initialMessage = formatPipelineProgressMessage('ingesting', initialEstimate);
     let persistedRun: LastPipelineRun = {
       status: 'running',
       ingested: 0,
@@ -459,7 +514,7 @@ export default function Dashboard() {
       newRelevant: 0,
       totalRelevant: 0,
       completedAt: new Date().toISOString(),
-      message: 'Starting pipeline...',
+      message: initialMessage,
     };
 
     const persistRun = (run: LastPipelineRun) => {
@@ -469,21 +524,31 @@ export default function Dashboard() {
     };
 
     setPipelineStatus('ingesting');
-    setPipelineMessage('Starting pipeline...');
+    setSecondsRemaining(initialEstimate);
     persistRun(persistedRun);
 
     try {
       const result = await runPipeline((status, msg, counts) => {
+        const estimate = getPipelineEstimateSeconds(status);
+        const message = isActivePipelineStatus(status)
+          ? formatPipelineProgressMessage(status, estimate)
+          : msg;
+
+        if (isActivePipelineStatus(status)) {
+          setSecondsRemaining(estimate);
+        }
+
         setPipelineStatus(status);
-        setPipelineMessage(msg);
         persistRun({
           ...persistedRun,
           ...counts,
           status: toLastPipelineRunStatus(status),
           completedAt: new Date().toISOString(),
-          message: msg,
+          message,
         });
       });
+      const elapsedSeconds = (Date.now() - startedAt) / 1000;
+      const completionMessage = formatPipelineCompletionMessage(result, elapsedSeconds);
       const completedRun: LastPipelineRun = {
         status: 'completed',
         ingested: result.ingested,
@@ -491,10 +556,10 @@ export default function Dashboard() {
         newRelevant: result.newRelevant,
         totalRelevant: result.totalRelevant,
         completedAt: new Date().toISOString(),
-        message: result.message,
+        message: completionMessage,
       };
+      setSecondsRemaining(0);
       setPipelineStatus('done');
-      setPipelineMessage(result.message);
       persistRun(completedRun);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
@@ -505,14 +570,17 @@ export default function Dashboard() {
         message,
       };
       setPipelineStatus('error');
-      setPipelineMessage(message);
+      setSecondsRemaining(0);
       persistRun(errorRun);
     }
   }
 
   const isPipelineRunning = isActivePipelineStatus(pipelineStatus);
   const bannerStatus = isPipelineRunning ? 'running' : lastPipelineRun?.status;
-  const bannerMessage = isPipelineRunning ? pipelineMessage : lastPipelineRun?.message;
+  const bannerMessage = isPipelineRunning
+    ? formatPipelineProgressMessage(pipelineStatus, secondsRemaining)
+    : lastPipelineRun?.message;
+  const pipelineProgress = getPipelineProgressPercent(pipelineStatus);
 
   return (
     <div className="space-y-8">
@@ -533,16 +601,26 @@ export default function Dashboard() {
               <>▶ Run Pipeline Now</>
             )}
           </button>
-          {bannerMessage && lastPipelineRun && (
+          {bannerMessage && (isPipelineRunning || lastPipelineRun) && (
             <div className={`text-xs max-w-xs text-right ${
               bannerStatus === 'error' ? 'text-[#ef4444]' :
               bannerStatus === 'completed' ? 'text-[#10b981]' :
               'text-[#9ca3af]'
             }`}>
               <p>{bannerMessage}</p>
-              <p className="mt-0.5 text-[#6b7280]">
-                Last pipeline ran {formatRelativeTime(lastPipelineRun.completedAt)}
-              </p>
+              {isPipelineRunning && (
+                <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#1f2937]">
+                  <div
+                    className="h-full rounded-full bg-[#3b82f6] transition-all duration-500"
+                    style={{ width: `${pipelineProgress}%` }}
+                  />
+                </div>
+              )}
+              {!isPipelineRunning && lastPipelineRun && (
+                <p className="mt-0.5 text-[#6b7280]">
+                  Last pipeline ran {formatRelativeTime(lastPipelineRun.completedAt)}
+                </p>
+              )}
             </div>
           )}
           <div className="text-xs text-[#6b7280] text-right space-y-0.5">
