@@ -24,7 +24,7 @@ Everything else: is_relevant: false. When in doubt, reject. High conviction only
   balanced: `
 ---
 SENSITIVITY MODE: BALANCED — expected output: 15–30 relevant signals per 100 markets.
-This is the default mode. Follow the ALWAYS RELEVANT and REJECT lists above exactly.`,
+This is the default mode. Apply the three-criteria framework and the REJECT list above exactly.`,
 
   broad: `
 ---
@@ -194,6 +194,24 @@ function daysUntilExpiry(endDate: string | null): number {
   return (new Date(endDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24);
 }
 
+export function isAnalyticallyUseful(market: MarketForAnalysis): boolean {
+  const probability = market.probability;
+  if (typeof probability === 'number' && Number.isFinite(probability)) {
+    if (probability >= 0.95 || probability <= 0.05) return false;
+  }
+
+  if (market.end_date) {
+    const endTime = new Date(market.end_date).getTime();
+    const hoursUntilEnd = (endTime - Date.now()) / (1000 * 60 * 60);
+    if (Number.isFinite(hoursUntilEnd) && hoursUntilEnd < 24) return false;
+  }
+
+  const intradayPattern = /\b(up or down|\d+:\d+\s*(AM|PM)\s*-\s*\d+:\d+)/i;
+  if (intradayPattern.test(market.question)) return false;
+
+  return true;
+}
+
 function isAnnualProductCycleMarket(question: string): boolean {
   const text = question.toLowerCase();
   const hasReleaseVerb = /\b(release|launch|ship|announce|unveil|introduce)\b/.test(text);
@@ -203,23 +221,63 @@ function isAnnualProductCycleMarket(question: string): boolean {
   return hasReleaseVerb && hasAnnualProduct && hasYear;
 }
 
+/**
+ * Returns true for pure BTC/ETH price-target markets ("Will Bitcoin close above $X?").
+ * These track price levels mechanically and offer no informational edge. Crypto
+ * REGULATION markets (ETF approvals, SEC actions) are excluded via the isRegulatory
+ * guard and remain eligible for analysis.
+ */
+function isPureCryptoPriceMarket(question: string): boolean {
+  const text = question.toLowerCase();
+  const hasCryptoAsset = /\b(bitcoin|btc|ethereum|eth)\b/.test(text);
+  const hasPriceTarget = /\$[\d,]+(?:k|m)?/i.test(question);
+  const hasPriceAction = /\b(above|below|exceed|surpass|hit|reach|cross)\b/.test(text);
+  const isRegulatory = /\b(etf|sec|cftc|approval|inflow|license|legislation|ban|regulation)\b/.test(text);
+  return hasCryptoAsset && hasPriceTarget && hasPriceAction && !isRegulatory;
+}
+
+/**
+ * Returns true when the market's end_date is within `hours` hours from now.
+ */
+function expiresWithinHours(endDate: string | null, hours: number): boolean {
+  if (!endDate) return false;
+  return new Date(endDate).getTime() - Date.now() < hours * 60 * 60 * 1000;
+}
+
 function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSignal {
-  // Rule 1: direct equity price targets are never useful signals
+  // Rule 1: pure BTC/ETH price-target markets — no catalyst, no informational edge.
+  if (isPureCryptoPriceMarket(market.question)) {
+    return {
+      ...signal,
+      is_relevant: false,
+      relevance_score: 0.15,
+      confidence: 0.8,
+      urgency: 'low',
+      reason:
+        'Pure crypto price-target market (BTC/ETH above/below $X) — tracks price levels mechanically with no discrete catalyst or informational edge.',
+      affected_stocks: [],
+      affected_sectors: [],
+      signal_type: null,
+      signal_direction: null,
+    };
+  }
+
+  // Rule 2: direct equity price targets restate market pricing, not catalysts.
   if (isDirectEquityPriceMarket(market.question)) {
     return {
       ...signal,
       is_relevant: false,
       relevance_score: Math.min(clamp(signal.relevance_score, 0.25), 0.35),
       confidence: Math.max(clamp(signal.confidence, 0.7), 0.7),
+      urgency: 'low',
       reason:
         'Direct stock-price prediction markets are derivative of equity prices, not independent Polymarket signals for analysts.',
       affected_stocks: [],
       affected_sectors: [],
       signal_type: null,
       signal_direction: null,
-      urgency: 'low',
       thesis:
-        'This market may describe where the stock trades, but it does not explain an external catalyst such as rates, regulation, tariffs, supply chains, product adoption, or company fundamentals.',
+        'This market describes where the stock trades but does not explain an external catalyst (rates, regulation, tariffs, supply chains, fundamentals).',
       evidence: ['The question is framed around a ticker crossing a price level.'],
       key_risks: ['Using this as a signal would double-count public equity market pricing.'],
       suggested_action:
@@ -227,14 +285,15 @@ function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSign
     };
   }
 
-  // Rule 2: expiring within 3 days AND is a price target → reject
-  if (daysUntilExpiry(market.end_date) <= 3 && isDirectEquityPriceMarket(market.question)) {
+  // Rule 3: markets expiring within 24 hours — no actionable window.
+  if (expiresWithinHours(market.end_date, 24)) {
     return {
       ...signal,
       is_relevant: false,
       relevance_score: 0.1,
       urgency: 'low',
-      reason: 'Market expires within 3 days and is a short-term price target — not a strategic signal.',
+      reason:
+        'Market expires within 24 hours — no actionable window for analyst positioning or portfolio adjustment.',
       affected_stocks: [],
       affected_sectors: [],
       signal_type: null,
@@ -242,14 +301,28 @@ function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSign
     };
   }
 
-  // Rule 3: annual product cycle near-certainties have no signal value
+  // Rule 4: probability outside the informational edge range (>85% or <15%).
+  // Consensus has already formed — the outcome is priced into public markets.
+  const prob = market.probability ?? 0.5;
+  if (prob > 0.85 || prob < 0.15) {
+    return {
+      ...signal,
+      is_relevant: false,
+      relevance_score: Math.min(clamp(signal.relevance_score, 0.2), 0.30),
+      urgency: 'low',
+      reason: `Probability ${(prob * 100).toFixed(0)}% is outside the 15–85% informational edge window — outcome has reached consensus and is already priced into public markets.`,
+    };
+  }
+
+  // Rule 5: annual product cycle near-certainties have no signal value.
   if (isAnnualProductCycleMarket(market.question)) {
     return {
       ...signal,
       is_relevant: false,
       relevance_score: 0.1,
       urgency: 'low',
-      reason: 'Annual product cycle market — foregone conclusion with no independent signal value for portfolio positioning.',
+      reason:
+        'Annual product cycle market — foregone conclusion with no independent signal value for portfolio positioning.',
       affected_stocks: [],
       affected_sectors: [],
       signal_type: null,
@@ -257,7 +330,7 @@ function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSign
     };
   }
 
-  // Rule 4: no stocks and no signal type means the transmission path is undefined
+  // Rule 6: no stocks and no signal type — transmission path to equities is undefined.
   const hasStocks = Array.isArray(signal.affected_stocks) && signal.affected_stocks.length > 0;
   if (!hasStocks && signal.signal_type === null) {
     return {
@@ -267,7 +340,7 @@ function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSign
     };
   }
 
-  // Rule 5: thin markets (volume < $10,000) — low confidence regardless of LLM assessment.
+  // Rule 7: thin markets (volume < $10,000) — low confidence regardless of LLM assessment.
   // Thin markets can be moved by a single participant and produce unreliable probability signals.
   const volume = market.volume ?? 0;
   if (volume < 10_000) {
@@ -550,8 +623,15 @@ async function fetchUnanalyzedMarkets(limit: number) {
   const unanalyzedMarkets = (markets as MarketForAnalysis[]).filter(
     (market) => !analyzedIds.has(market.id)
   );
+  const analyticallyUsefulMarkets = unanalyzedMarkets.filter(isAnalyticallyUseful);
+  const rejectedCount = unanalyzedMarkets.length - analyticallyUsefulMarkets.length;
+  if (rejectedCount > 0) {
+    console.log(
+      `[Filter] Pre-filter rejected ${rejectedCount}/${unanalyzedMarkets.length} unanalyzed markets before LLM analysis`
+    );
+  }
 
-  return sortMarketsForAnalysis(unanalyzedMarkets, config)
+  return sortMarketsForAnalysis(analyticallyUsefulMarkets, config)
     .slice(0, limit)
     .map(({ market, priority }) => ({
       ...market,
@@ -671,31 +751,38 @@ async function analyzeBatch(markets: MarketForAnalysis[], sensitivity: Sensitivi
 
 ${BITCAP_RESEARCH_CONTEXT}
 
-Your job is judgment, not keyword matching. A market can be relevant even when it does not name a company if the event has a clear transmission path to public equities. The goal is 15–30 relevant signals out of every ~100 markets. If you are returning fewer than 10 relevant signals from a batch of 12, you are being too aggressive.
+Your job is judgment, not keyword matching. A market can be relevant even when it does not name a company if the event has a clear transmission path to public equities.
 
-ALWAYS RELEVANT — mark is_relevant: true with no exceptions for these:
-- Any market that directly mentions a BIT Capital holding by ticker or name: IREN, MSFT, GOOGL, META, NVDA, SOFI, RDDT, HIMS, LMND, HNGE, CRCL, APLD, COHR, GLXY, NTSK — these are direct portfolio signals regardless of probability level.
+RELEVANCE FRAMEWORK — a market is relevant ONLY when ALL THREE criteria are satisfied:
+
+1. SPECIFIC CATALYST: A discrete event, regulation, ruling, filing, launch, or decision is driving the probability. Generic price drift or market momentum alone does not qualify.
+
+2. INFORMATIONAL EDGE: The outcome is not already obvious from public information. Markets at >85% or <15% probability have reached consensus — the signal is already priced in. Reject these.
+
+3. ACTIONABILITY: An analyst could plausibly take a position, hedge, or reweight a portfolio holding based on this signal. Ask yourself: "What would I tell the portfolio manager to DO?" If the answer is unclear, set is_relevant: false.
+
+ALWAYS HIGH PRIORITY — these market types almost always satisfy all three criteria. Give them extra scrutiny before rejecting:
+- Any market that directly mentions a BIT Capital holding by ticker or name: IREN, MSFT, GOOGL, META, NVDA, SOFI, RDDT, HIMS, LMND, HNGE, CRCL, APLD, COHR, GLXY, NTSK
 - Fed rate decisions, FOMC outcomes, or any central bank policy shift that reprices growth equities.
 - AI regulation in the US or EU — any bill, executive order, or consent decree affecting LLMs, foundation models, or AI deployment.
 - Crypto regulation — ETF approvals/rejections, exchange licensing, stablecoin legislation, SEC/CFTC actions.
 - Semiconductor export controls or tariffs, especially US–China or Taiwan-related restrictions on chips, equipment, or advanced packaging.
-- Bitcoin or Ethereum price markets on weekly or monthly timeframes (not intraday/hourly).
 - Major tech company earnings results — beating or missing estimates by a meaningful margin.
 - IPOs of significant tech companies (>$1B expected market cap) that could affect sector dynamics or compete with holdings.
 - Taiwan Strait / China geopolitical events with a plausible impact on semiconductor supply chains.
 
-REJECT — mark is_relevant: false for these only:
-- 5-minute, hourly, or daily Bitcoin/crypto price windows — too short-term to be strategic signals.
+REJECT — mark is_relevant: false for these:
+- Pure BTC/ETH price-target markets ("Will Bitcoin close above $100K?" / "Will Ethereum end 2025 above $5,000?") — no discrete catalyst. Crypto REGULATION markets (ETF approvals, SEC actions, stablecoin legislation) remain relevant.
+- Markets with probability above 85% or below 15% — consensus has already formed and the outcome is priced into public markets.
+- Markets expiring within 24 hours — no actionable window for portfolio adjustment.
+- Annual product cycle certainties: "Will Apple release an iPhone in 2025?" — foregone conclusions with no timing uncertainty or signal value.
+- 5-minute, hourly, or daily crypto/equity price windows — too short-term to be strategic signals.
 - Sports markets, even if a tech company is a sponsor.
 - Celebrity or entertainment markets with no equity transmission path: award shows, reality TV, celebrity tweets.
-- Markets expiring today that are pure same-day price bets with no fundamental catalyst ("Will X close above $Y today?").
-- Annual product cycle certainties: "Will Apple release an iPhone in 2025?" — foregone conclusions with no timing uncertainty.
 - Non-tech political markets with no plausible tech equity transmission path: crime rates, local elections, immigration.
 - Oil, agriculture, and real estate markets unless directly tied to data center energy costs or semiconductor materials.
 
-Do NOT reject a market solely because its probability is high or low. A 95% probability on a Fed rate hold is still a signal — it tells us the market is pricing in stability, which affects growth equity valuations. Probability level alone is never a rejection reason.
-
-Important: direct markets about a stock crossing a price level on a specific date are usually not useful signals — they restate equity pricing rather than explaining a catalyst. Mark them not relevant unless the question contains a fundamental driver.
+Important: direct markets about a stock crossing a price level restate equity pricing rather than explaining a catalyst. Mark them not relevant unless the question contains a fundamental driver (regulation, earnings surprise, M&A).
 
 The deterministic_candidate_score is a triage hint. You may disagree with it, but explain why in the reason/thesis.
 
