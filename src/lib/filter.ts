@@ -154,6 +154,24 @@ MARK is_relevant = false ONLY IF:
   GOOGL/AMZN (investors); OpenAI affects MSFT (investor + Azure).
 - The market is a direct price-target on a stock ("Will NVDA hit
   $X?") — this restates pricing, not a catalyst.
+- The market is a state-level political race, single-candidate
+  primary, gubernatorial/mayoral race, or local election. These
+  are too indirect to give tech equity edge.
+- The market is a narrow-band exact-outcome bet ("Will GDP be
+  between 4.6% and 4.9%?"). These bet on landing zones, not
+  directions, and provide no analytical edge.
+
+REASONING DISCIPLINE:
+
+A real signal has a SHORT chain of reasoning: market outcome →
+direct impact on a named company's near-term P&L or valuation.
+
+A long chain is a red flag: market outcome → policy change →
+regulatory implementation → company strategy shift → financial
+impact. If you find yourself writing phrases like "could have
+implications," "might affect," "if the winner has a stance on,"
+or "potentially impact" — the chain is too long. Set is_relevant
+to false.
 
 GUIDANCE FOR MACRO MARKETS:
 
@@ -269,6 +287,9 @@ const rejectionStats = {
   expires_soon: 0,
   price_target: 0,
   low_confidence: 0,
+  thin_volume: 0,
+  political_noise: 0,
+  narrow_band: 0,
   passed: 0,
 };
 
@@ -279,6 +300,9 @@ function resetRejectionStats() {
   rejectionStats.expires_soon = 0;
   rejectionStats.price_target = 0;
   rejectionStats.low_confidence = 0;
+  rejectionStats.thin_volume = 0;
+  rejectionStats.political_noise = 0;
+  rejectionStats.narrow_band = 0;
   rejectionStats.passed = 0;
 }
 
@@ -290,7 +314,52 @@ function logRejectionStats() {
   console.log(`[Filter]   Expires within 24h:        ${rejectionStats.expires_soon}`);
   console.log(`[Filter]   Direct price-target:       ${rejectionStats.price_target}`);
   console.log(`[Filter]   Confidence < 0.45:         ${rejectionStats.low_confidence}`);
+  console.log(`[Filter]   Volume < $10K (thin):      ${rejectionStats.thin_volume}`);
+  console.log(`[Filter]   Political/election noise:  ${rejectionStats.political_noise}`);
+  console.log(`[Filter]   Narrow-band exact outcome: ${rejectionStats.narrow_band}`);
   console.log(`[Filter]   PASSED:                    ${rejectionStats.passed}`);
+}
+
+// --- HELPERS for the new noise gates -----------------------------------
+
+const MIN_VOLUME_USD = 10_000;
+
+// Markets like "Will X win the 2026 [State] [Party] Primary?" or
+// "Will Y win the [Year] [State] [Office] race?" — single-candidate,
+// state-level, or primary races are too indirect to give tech equity edge.
+function isElectionNoise(question: string): boolean {
+  const q = question.toLowerCase();
+  const hasPersonNamed = /\bwill\s+[a-z][a-z\-']+\s+[a-z][a-z\-']+\s+(win|become|be elected)/i.test(question);
+  const hasElectionTerm =
+    q.includes('primary') ||
+    q.includes('gubernatorial') ||
+    q.includes('senate race') ||
+    q.includes('house race') ||
+    q.includes('governor of') ||
+    q.includes('mayor of') ||
+    q.includes('nominee') ||
+    q.includes('caucus');
+  return hasPersonNamed && hasElectionTerm;
+}
+
+// Markets like "Will X be between A.B% and C.D%?" or
+// "Will X be between A and B?" with a narrow band bet on an exact
+// outcome rather than a direction. These have ~50% probability by
+// construction and offer no analyst edge over the consensus.
+function isNarrowBandExactOutcome(question: string): boolean {
+  const q = question.toLowerCase();
+  if (!q.includes('between')) return false;
+  // Look for "between X and Y" with numeric bounds
+  const match = q.match(/between\s+(-?\d+(?:\.\d+)?)\s*%?\s+and\s+(-?\d+(?:\.\d+)?)\s*%?/);
+  if (!match) return false;
+  const low = parseFloat(match[1]);
+  const high = parseFloat(match[2]);
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return false;
+  const band = Math.abs(high - low);
+  const midpoint = Math.abs((high + low) / 2) || 1;
+  // Relative band width — if the band is <20% of the midpoint magnitude,
+  // this is a narrow exact-outcome bet, not a directional signal.
+  return band / midpoint < 0.2;
 }
 
 function enforceValidation(signal: ParsedSignal, market: MarketForAnalysis): ParsedSignal {
@@ -380,6 +449,48 @@ function enforceValidation(signal: ParsedSignal, market: MarketForAnalysis): Par
       affected_stocks: validTickers,
       is_relevant: false,
       reason: 'Direct stock price-target market — restates equity pricing rather than explaining an independent catalyst.',
+    };
+  }
+
+  // GATE 7: Thin volume — markets below $10K aren't credible signals.
+  // Real informed money doesn't trade thin markets, so price action
+  // there is more noise than signal.
+  const volume = market.volume ?? 0;
+  if (volume < MIN_VOLUME_USD) {
+    rejectionStats.thin_volume += 1;
+    console.log(`[Filter] REJECT thin_volume ($${volume.toFixed(0)}): "${market.question.substring(0, 80)}"`);
+    return {
+      ...signal,
+      affected_stocks: validTickers,
+      is_relevant: false,
+      reason: `Volume $${(volume / 1000).toFixed(1)}K is below the $10K credibility threshold — market is too thin to reflect informed pricing.`,
+    };
+  }
+
+  // GATE 8: Political election noise — state-level primaries and
+  // single-candidate races are too indirect to provide tech equity edge.
+  if (isElectionNoise(market.question)) {
+    rejectionStats.political_noise += 1;
+    console.log(`[Filter] REJECT political_noise: "${market.question.substring(0, 80)}"`);
+    return {
+      ...signal,
+      affected_stocks: validTickers,
+      is_relevant: false,
+      reason: 'State-level or single-candidate political race — too indirect to provide actionable read-through to BIT Capital holdings.',
+    };
+  }
+
+  // GATE 9: Narrow-band exact-outcome bets — "Will X be between A and B"
+  // where the band is narrow. These bet on an exact landing zone, not
+  // a direction, and offer no informational edge over consensus.
+  if (isNarrowBandExactOutcome(market.question)) {
+    rejectionStats.narrow_band += 1;
+    console.log(`[Filter] REJECT narrow_band: "${market.question.substring(0, 80)}"`);
+    return {
+      ...signal,
+      affected_stocks: validTickers,
+      is_relevant: false,
+      reason: 'Narrow-band exact-outcome market — bets on a specific numerical landing zone rather than a direction; provides no analytical edge.',
     };
   }
 
