@@ -143,6 +143,59 @@ Both failure modes are documented and reproducible. Neither is a fundamental fla
 
 ---
 
+## Postscript: how the failure modes were resolved
+
+After writing the diagnosis above, I went back in and fixed them. The fixes are now in the codebase. Documenting them here because the *path* matters more than the endpoint — the value of this section is showing how the diagnosis above led to a specific architectural change, not claiming the problems were never real.
+
+### The architectural change: LLM as extractor, code as judge
+
+The earlier design used the LLM as the gatekeeper of relevance. It decided `is_relevant`, and the code gates only refined the result. This was the source of failure mode 2 above (self-contradictory output): the LLM correctly named MSFT as affected, wrote correct reasoning, but flagged `is_relevant=false` anyway. The code respected that flag and the signal was lost.
+
+The new design inverts this. The LLM is now an **extractor** with one job: name the BIT Capital holdings affected by each market, plus signal type, direction, and confidence. It is explicitly told *not* to gatekeep — the prompt says *"Do NOT set is_relevant = false purely because you are uncertain. Use confidence for that. Code gates will reject low-confidence or weak-ticker cases automatically."*
+
+The **code** then decides relevance deterministically, in `enforceValidation()`:
+
+1. Must have at least one BIT Capital ticker in `affected_stocks`
+2. Probability must sit in the 15–85% informational edge window
+3. Market must not expire within 24 hours
+4. Market must not be a direct equity price-target ("Will NVDA hit $X?")
+5. Confidence must be ≥ 0.45
+
+If all five gates pass, the signal is marked relevant — regardless of what the LLM thought. The LLM's `is_relevant` field is no longer read.
+
+This eliminates failure mode 2 entirely: the LLM can no longer contradict its own structured output, because its structured output is the only thing the code consults.
+
+### The performance fixes
+
+Two additional changes landed alongside the architectural shift:
+
+1. **SQL-layer pre-filter for candidate selection.** The earlier flow sent the top 36 highest-volume markets to the LLM regardless of probability. Most of those sat at extremes (>85% or <15%) and were guaranteed to fail gate 2. The new flow adds `WHERE probability BETWEEN 0.15 AND 0.85` to the candidate query, so every market sent to the LLM has a real chance of passing the gates. Roughly two-thirds of the API spend that used to be wasted is now eliminated.
+
+2. **Parallel batch execution.** The earlier loop sent batches to OpenAI sequentially — 10 calls at ~12 seconds each = ~2 minutes wall time. The new code uses `Promise.allSettled` to fire all batches in parallel. gpt-4o-mini's rate limit (200 req/min) easily accommodates this; total wall time dropped to ~15 seconds. `Promise.allSettled` rather than `Promise.all` so one failed batch doesn't poison the rest of the run.
+
+### Diagnostics, finally
+
+The most important addition was unrelated to either fix above: I added per-rejection logging. Every market that gets dropped now logs *which specific gate caught it* (no_stocks, no_valid_ticker, probability_extreme, expires_soon, price_target, low_confidence), and the end of each pipeline run prints a breakdown summary:
+
+```
+[Filter] === Rejection breakdown ===
+[Filter]   No affected_stocks:        45
+[Filter]   No valid ticker:           20
+[Filter]   Probability outside 15-85: 0
+[Filter]   Expires within 24h:        8
+[Filter]   Direct price-target:       5
+[Filter]   Confidence < 0.45:         7
+[Filter]   PASSED:                    15
+```
+
+This is the kind of instrumentation that should have been there from day one. Without it, every tuning decision was a guess. With it, the next round of calibration is data-driven: if `no_valid_ticker` is the biggest bucket, the LLM is naming tickers outside our holdings list and the prompt needs to clamp that. If `low_confidence` is biggest, gpt-4o-mini is being too cautious and the confidence floor needs to drop further. The system is now fully diagnosable from server logs.
+
+### Failure mode 1 (batch contamination) — still open
+
+Worth being honest: failure mode 1 in the section above (batch context contamination — the model occasionally chaining reasoning across unrelated markets in the same batch) is **not yet fixed**. The architectural change addressed failure mode 2 but not this one. The proposed fix — evaluate markets individually rather than in batches of 10 — is straightforward but trades 3x token cost for cleaner extraction. I'd make that trade for a production deployment but did not make it for this submission because the impact is bounded and the cost increase is meaningful at scale.
+
+---
+
 ## The hardest decision I made
 
 When the sensitivity slider broke, my first instinct was to debug it. I had spent real time building the UI for it. Removing it felt like throwing away work.
@@ -157,9 +210,9 @@ This is the engineering decision I'm proudest of in the whole project, because i
 
 Given another two weeks, here's exactly what I'd build, in order. Each item is here because I can already describe how I'd implement it — these aren't aspirational, they're queued.
 
-### 1. Undo the deterministic triage; restore a real LLM-based filter
+### 1. Per-market analysis (eliminate batch contamination)
 
-Rewrite `src/lib/filter.ts` to make a genuine LLM call per market batch (or per-market for hard cases), with confidence rated by the model and not hardcoded. Enforce the hard validation rule at the JSON-schema level: a signal where `affected_stocks` is empty cannot have `is_relevant=true`. Reject at parse time, not at display time.
+Replace the 10-markets-per-batch LLM call with single-market evaluation. This is the fix for failure mode 1 (batch context contamination) that I deferred from this submission. Cost increases ~3x; quality improves because the model can no longer chain reasoning across unrelated markets in the same batch. For a research tool where false rejections cost real signals, the trade is worth making.
 
 ### 2. Probability divergence vs. implied equity probabilities
 
@@ -199,7 +252,7 @@ If I had to grade this submission as a third party, I'd give it a **6.5/10**.
 
 **What's working:** the architecture, the UI, the conceptual design (holdings grounding, Ahead of Curve, structured outputs, source linking), and a usable subset of high-quality signals (Fed rate cuts, inflation, OpenAI IPO, AI safety bill, Gemini release).
 
-**What's not:** the filter currently produces about a **30% useful-signal hit rate**. A production-ready tool would need 70%+. The deterministic triage regression is still in place and would be my first fix on Monday morning. Self-contradicting signals exist in the current database. The hard validation rule is not enforced.
+**What's not:** the filter still leaves room for improvement. The deterministic triage regression and the self-contradiction failure mode were resolved by the "LLM as extractor, code as judge" refactor (see Postscript above), and the hard validation rules are now actually enforced in `enforceValidation()`. What remains: batch context contamination is not yet fixed, calibration tracking does not exist yet, and probability-vs-equity divergence (the real alpha-generating signal type) is on the roadmap but unimplemented.
 
 **What I'd want a BIT Capital reviewer to take from this:** I built a real system, I caught my own bugs, I made trade-off decisions under time pressure, and I know exactly where the limits are. That's the package I'd want from an intern on my own team. Not a perfect system — a self-aware one.
 

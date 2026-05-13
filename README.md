@@ -40,18 +40,29 @@ The goal: turn ~1,000 daily markets into a 5-minute morning read with the **3 si
 └────────┬─────────────┘
          │ query unanalyzed
          ▼
-┌──────────────────────┐
-│  LLM Filter          │  src/lib/filter.ts (OpenAI GPT-4o-mini)
-│  - 10 markets/batch  │
-│  - JSON output       │
-│  - Domain grounded   │
-└────────┬─────────────┘
-         │ enforceValidation() — 6 hard code-level gates
+┌──────────────────────────┐
+│  SQL pre-filter          │  WHERE probability BETWEEN 0.15 AND 0.85
+│  (informational edge)    │  candidates ranked by theme score + volume
+└────────┬─────────────────┘
+         │ top 100 candidates
          ▼
-┌──────────────────────┐
-│  Quality Gate        │  ticker whitelist · probability 15–85%
-│  (post-LLM, in code) │  expiry >24h · no price-target markets
-└────────┬─────────────┘
+┌──────────────────────────┐
+│  LLM Extractor           │  src/lib/filter.ts (OpenAI GPT-4o-mini)
+│  - 10 batches in parallel│  Job: name tickers, signal type, direction,
+│  - JSON output           │       confidence — NOT decide relevance
+│  - Permissive extraction │  ~15s total wall time
+└────────┬─────────────────┘
+         │ structured extraction
+         ▼
+┌──────────────────────────┐
+│  Code Judge              │  enforceValidation()
+│  (the relevance decision)│  Sets is_relevant ONLY if all gates pass:
+│                          │   1. ≥1 BIT Capital ticker
+│                          │   2. probability 15–85%
+│                          │   3. expiry > 24h
+│                          │   4. not a price-target market
+│                          │   5. confidence ≥ 0.45
+└────────┬─────────────────┘
          │ stores structured signals
          ▼
 ┌──────────────────────┐
@@ -111,18 +122,31 @@ Every filtered market produces a strict JSON object:
 
 This is queryable, sortable, and aggregatable. The UI doesn't have to parse natural language — it just renders structured fields. An analyst can filter by urgency, ticker, or signal type in one click.
 
-### 3. Two-layer filter: LLM + code-level gates
+### 3. LLM as extractor, code as judge
 
-A common failure in LLM-based filters is that the model occasionally ignores its own instructions — marking a 95% probability market as "relevant" or returning a valid ticker while setting `is_relevant=false`. To prevent this, the filter runs a **second layer of validation in code** after every LLM response, in `enforceValidation()`:
+The earliest version of this filter used the LLM as the gatekeeper — it decided `is_relevant` and the code only checked its work. That approach produced a ~1% hit rate on real Polymarket data, with gpt-4o-mini frequently contradicting itself: naming a BIT Capital ticker as affected, writing valid reasoning, then setting `is_relevant=false` with `confidence=0`. The model was systematically over-cautious on borderline-good signals.
 
-1. **Ticker whitelist** — `affected_stocks` must contain at least one BIT Capital holding; otherwise rejected.
-2. **Confidence floor** — signals below 0.55 confidence are rejected regardless of LLM verdict.
-3. **Holdings enforcement** — any ticker not on the whitelist is stripped from the output.
-4. **Probability gate** — markets outside the **15–85% informational edge window** are rejected. Below 15% or above 85%, the outcome has reached consensus and is already priced in.
-5. **Expiry gate** — markets expiring within 24 hours are rejected; no actionable window remains.
-6. **Price-target gate** — markets structured as direct equity price targets ("Will NVDA hit (HIGH) $224?") are rejected; they restate pricing rather than explain a catalyst.
+The current architecture inverts this. The LLM is now an **extractor**, not a judge:
 
-The LLM cannot bypass these gates. If it marks a signal relevant, the code overrides it.
+**LLM job (in `filter.ts`):**
+- Read the market question + description
+- Name the BIT Capital holdings affected (be permissive — name them generously)
+- Tag signal type, direction, urgency
+- Self-rate confidence in the read-through
+
+**Code job (in `enforceValidation()`):**
+- Decide `is_relevant` based on the LLM's structured output, using deterministic gates:
+  1. **Ticker whitelist** — at least one extracted ticker must be in the 23-holding BIT Capital list
+  2. **Probability gate** — market probability must sit in the **15–85% informational edge window**
+  3. **Expiry gate** — market must not resolve within 24 hours (no actionable window)
+  4. **Price-target gate** — market must not be a direct equity price target ("Will NVDA hit $250?")
+  5. **Confidence floor** — LLM's self-rated confidence must be ≥ 0.45
+
+If all five gates pass, the signal is marked relevant **regardless of what the LLM thought** about its own output. This sidesteps the gpt-4o-mini self-contradiction problem entirely — the LLM only has to do the parts it's good at (extraction), and the code does the parts it can do deterministically (rule checking).
+
+A SQL-layer pre-filter ensures only markets in the 15–85% probability window are even considered candidates — saving roughly two-thirds of the API spend that would otherwise be burned on markets the code gate will reject anyway.
+
+Every rejected market is logged with the specific gate that caught it, making the system fully diagnosable from server logs.
 
 ### 4. The "ahead of curve" flag
 
@@ -285,75 +309,70 @@ Foreign keys link `signals.market_id → markets.id`, and `reports.market_ids` r
 
 ## LLM Filter Design
 
-The system prompt is the core intellectual work of this project. It is reproduced exactly below, as it appears in `src/lib/filter.ts`:
+The system prompt is the core intellectual work of this project. Note the framing: the LLM is asked to **extract** information, not to judge relevance. The code does the judging. This was a deliberate redesign after the earlier "LLM as gatekeeper" approach produced a ~1% hit rate due to model self-contradiction.
+
+The prompt is reproduced exactly below, as it appears in `src/lib/filter.ts`:
 
 ```
-You are a senior research analyst at BIT Capital, a Berlin-based
+You are an extraction assistant for BIT Capital, a Berlin-based
 asset manager focused on global technology equities. Your job is
-to filter Polymarket prediction markets for genuine investment signals.
+to extract structured information about each Polymarket prediction
+market — NOT to decide whether it is "worth trading." Code-level
+gates downstream will make the final relevance decision based on
+your extracted fields.
 
 BIT CAPITAL HOLDINGS (the only tickers you may use):
 NVDA, MSFT, GOOGL, GOOG, META, AAPL, AMZN, AMD, ASML, TSM,
 ORCL, ADBE, CRM, NOW, PLTR, ARM, AVGO, QCOM, INTC, MU, NFLX,
 SHOP, COIN
 
-A MARKET IS RELEVANT ONLY IF ALL THREE ARE TRUE:
-  1. You can name at least ONE specific ticker from the holdings
-     list above in "affected_stocks". If you cannot name one, the
-     market is NOT relevant.
-  2. The market has a specific catalyst (regulation, earnings,
-     launch, ruling, decision) — not a generic price movement.
-  3. The market is not already fully priced in (reject probability
-     above 0.85 or below 0.15).
+YOUR JOB IS SIMPLE:
 
-REJECT THESE CATEGORIES ENTIRELY:
-  - Pure crypto price targets (e.g. "Will BTC reach $X?")
-  - Markets about private companies with no BIT Capital exposure
-    (SpaceX, Anthropic, OpenAI as standalones — note: OpenAI IS
-    relevant via MSFT exposure)
-  - Sports, entertainment, weather, celebrity markets
-  - Pure geopolitical hypotheticals with no clear equity read-through
-  - Markets resolving in less than 12 hours
+For each market, name the BIT Capital holdings whose share price
+would plausibly respond to this market's outcome. Be GENEROUS in
+naming tickers — if there's any reasonable read-through, include
+the ticker. The code gates downstream will filter for quality;
+your job is to ensure no real signal is missed.
 
-FEW-SHOT EXAMPLES:
+MARK is_relevant = true IF:
+  - The market mentions or affects any company/sector/macro factor
+    that has read-through to ANY ticker in the holdings list above.
+  - Examples of "read-through": competitive dynamics, supply chain,
+    regulatory pressure, macro multiples, M&A activity, AI capability
+    benchmarks (matters for MSFT/GOOGL/META/NVDA).
 
-Market: "Will the Fed cut rates by June 2026?"
-Output: {
-  "is_relevant": true, "confidence": 0.85,
-  "reason": "Direct macro signal for tech multiples; rate cuts benefit
-             growth equity valuations across BIT Capital's core holdings.",
-  "affected_stocks": ["MSFT", "GOOGL", "META", "NVDA"],
-  "signal_type": "macro", "signal_direction": "positive",
-  "urgency": "high", "thematic_buckets": ["Macro/Rates", "Big Tech Platforms"],
-  "is_ahead_of_curve": false
-}
+MARK is_relevant = false ONLY IF:
+  - The market is about sports, entertainment, weather, celebrities.
+  - The market is a pure crypto price target ("Will BTC reach $X?")
+    AND there is no spillover to COIN.
+  - The market is about a private company (SpaceX, xAI, Anthropic)
+    with NO read-through to public holdings. Note: Anthropic affects
+    GOOGL/AMZN (investors); OpenAI affects MSFT (investor + Azure).
+  - The market is a direct price-target on a stock ("Will NVDA hit
+    $X?") — this restates pricing, not a catalyst.
 
-Market: "Will TSMC announce Arizona fab delay before Q3?"
-Output: {
-  "is_relevant": true, "confidence": 0.82,
-  "reason": "Supply chain disruption for advanced node capacity directly
-             impacts NVDA, AMD, and AAPL production timelines.",
-  "affected_stocks": ["TSM", "NVDA", "AMD", "AAPL"],
-  "signal_type": "supply_chain", "signal_direction": "negative",
-  "urgency": "medium", "thematic_buckets": ["Semiconductors"],
-  "is_ahead_of_curve": true
-}
+GUIDANCE FOR MACRO MARKETS:
 
-Market: "Will Bitcoin be above $76,000 on May 10?"
-Output: {
-  "is_relevant": false, "confidence": 0.95,
-  "reason": "Pure crypto price target with no specific catalyst.
-             No BIT Capital ticker has direct exposure to this outcome.",
-  "affected_stocks": [], "signal_type": null,
-  "signal_direction": null, "urgency": null,
-  "thematic_buckets": [], "is_ahead_of_curve": false
-}
+Fed rate decisions, CPI prints, jobs reports, tariff announcements,
+AI regulation, antitrust rulings, and export controls all affect
+tech multiples. For these, name the MOST EXPOSED holdings:
+  - Rates/macro/recession → MSFT, GOOGL, META, NVDA, AAPL
+  - AI regulation → MSFT, GOOGL, META, NVDA
+  - China/Taiwan/export controls → NVDA, AMD, ASML, TSM, AAPL
+  - Antitrust → the named company (AAPL, GOOGL, AMZN, META)
 
-Return a JSON object with a "signals" array containing one analyzed
-signal per input market, in the same order.
+CONFIDENCE: Reflects how confident you are in the read-through.
+  - 0.80+: Direct, named company event with clear near-term P&L impact.
+  - 0.65-0.79: Strong thematic exposure with identified ticker(s).
+  - 0.50-0.64: Plausible read-through, real but indirect.
+  - Below 0.50: Very weak connection — but still try to name tickers.
+
+Do NOT set is_relevant = false purely because you are uncertain.
+Use confidence for that. Code gates will reject low-confidence
+or weak-ticker cases automatically.
 ```
 
-The three-criteria framework (specific ticker, specific catalyst, not already priced in) was arrived at after two failed iterations — see [PROJECT_LEARNINGS.md](./PROJECT_LEARNINGS.md) for a full account of the filter evolution and its failure modes.
+The prompt deliberately tells the LLM **not** to gatekeep. The relevance decision is then made in code by `enforceValidation()`, which applies the five gates listed in section 3 above. This separation eliminates the LLM's "I named the ticker, but is_relevant=false anyway" failure mode that plagued the earlier design — see [PROJECT_LEARNINGS.md](./PROJECT_LEARNINGS.md) for the full evolution and failure-mode analysis.
 
 ---
 
