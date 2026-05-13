@@ -42,9 +42,15 @@ The goal: turn ~1,000 daily markets into a 5-minute morning read with the **3 si
          ▼
 ┌──────────────────────┐
 │  LLM Filter          │  src/lib/filter.ts (OpenAI GPT-4o-mini)
-│  - 15 markets/batch  │
+│  - 10 markets/batch  │
 │  - JSON output       │
 │  - Domain grounded   │
+└────────┬─────────────┘
+         │ enforceValidation() — 6 hard code-level gates
+         ▼
+┌──────────────────────┐
+│  Quality Gate        │  ticker whitelist · probability 15–85%
+│  (post-LLM, in code) │  expiry >24h · no price-target markets
 └────────┬─────────────┘
          │ stores structured signals
          ▼
@@ -77,11 +83,11 @@ The goal: turn ~1,000 daily markets into a 5-minute morning read with the **3 si
 
 ### 1. Filtering is grounded in real BIT Capital holdings
 
-The LLM filter doesn't use generic tech tickers. It uses a curated list of ~30 tickers derived from BIT Capital's public fund holdings (BIT Global Technology Leaders, etc.) — NVIDIA, ASML, TSMC, Microsoft, Meta, and so on.
+The LLM filter doesn't use generic tech tickers. It uses a curated list of **23 tickers** derived from BIT Capital's public fund holdings (BIT Global Technology Leaders, etc.) — NVIDIA, ASML, TSMC, Microsoft, Meta, and so on.
 
-This means a market about "EU antitrust action against Apple" gets classified as **directly relevant to AAPL**, while a market about "Will Bitcoin reach $120k?" gets correctly tagged as **thematic** (crypto sentiment / risk-on) rather than directly actionable.
+This means a market about "EU antitrust action against Apple" gets classified as **directly relevant to AAPL**, while a market about "Will Bitcoin reach $120k?" gets correctly rejected as a pure crypto price target with no BIT Capital exposure.
 
-The prompt explicitly tells the model: *"You are filtering signals for analysts at BIT Capital, a fund focused on global technology equities. Here are the tickers we track..."*
+The prompt explicitly grounds the model: *"You are a senior research analyst at BIT Capital. Here are the only tickers you may use: NVDA, MSFT, GOOGL, META, AAPL, AMZN, AMD, ASML, TSM..."* — and names the exact rejection categories.
 
 This single design choice eliminates ~80% of the noise that a generic "is this finance-related?" filter would let through.
 
@@ -105,16 +111,29 @@ Every filtered market produces a strict JSON object:
 
 This is queryable, sortable, and aggregatable. The UI doesn't have to parse natural language — it just renders structured fields. An analyst can filter by urgency, ticker, or signal type in one click.
 
-### 3. The "ahead of curve" flag
+### 3. Two-layer filter: LLM + code-level gates
+
+A common failure in LLM-based filters is that the model occasionally ignores its own instructions — marking a 95% probability market as "relevant" or returning a valid ticker while setting `is_relevant=false`. To prevent this, the filter runs a **second layer of validation in code** after every LLM response, in `enforceValidation()`:
+
+1. **Ticker whitelist** — `affected_stocks` must contain at least one BIT Capital holding; otherwise rejected.
+2. **Confidence floor** — signals below 0.55 confidence are rejected regardless of LLM verdict.
+3. **Holdings enforcement** — any ticker not on the whitelist is stripped from the output.
+4. **Probability gate** — markets outside the **15–85% informational edge window** are rejected. Below 15% or above 85%, the outcome has reached consensus and is already priced in.
+5. **Expiry gate** — markets expiring within 24 hours are rejected; no actionable window remains.
+6. **Price-target gate** — markets structured as direct equity price targets ("Will NVDA hit (HIGH) $224?") are rejected; they restate pricing rather than explain a catalyst.
+
+The LLM cannot bypass these gates. If it marks a signal relevant, the code overrides it.
+
+### 4. The "ahead of curve" flag
 
 A signal is only valuable if the market doesn't already know about it. The filter checks for markets where:
-- Probability sits between 25–75% (genuine uncertainty, not consensus)
+- Probability sits between **15–85%** (genuine uncertainty, not consensus)
 - Volume > $50K (real money, not a thin market)
-- Probability has moved recently (the market is updating)
+- Probability has moved recently (the market is updating its view)
 
-These get flagged as **"ahead of curve"** — the kind of signal an analyst would want to investigate before the equity market repriced.
+These get flagged as **"ahead of curve"** — the window where the prediction market is pricing something in but the equity market hasn't caught up yet.
 
-### 4. Reports are written like analyst notes, not chatbot summaries
+### 5. Reports are written like analyst notes, not chatbot summaries
 
 The report generator uses a separate LLM call with a prompt that explicitly mimics a sell-side analyst tone: short paragraphs, named tickers, explicit direction, contrarian section at the end. Output is rendered as Markdown and exportable as PDF.
 
@@ -197,7 +216,6 @@ After completion, signals populate across the Dashboard, Signals page, and Repor
 
 ### Settings page
 - Edit the watched tickers list (changes flow into the next LLM call)
-- Adjust filter sensitivity threshold
 - Set scheduler frequency (every 1h, 6h, 12h, 24h)
 
 ---
@@ -265,6 +283,80 @@ Foreign keys link `signals.market_id → markets.id`, and `reports.market_ids` r
 
 ---
 
+## LLM Filter Design
+
+The system prompt is the core intellectual work of this project. It is reproduced exactly below, as it appears in `src/lib/filter.ts`:
+
+```
+You are a senior research analyst at BIT Capital, a Berlin-based
+asset manager focused on global technology equities. Your job is
+to filter Polymarket prediction markets for genuine investment signals.
+
+BIT CAPITAL HOLDINGS (the only tickers you may use):
+NVDA, MSFT, GOOGL, GOOG, META, AAPL, AMZN, AMD, ASML, TSM,
+ORCL, ADBE, CRM, NOW, PLTR, ARM, AVGO, QCOM, INTC, MU, NFLX,
+SHOP, COIN
+
+A MARKET IS RELEVANT ONLY IF ALL THREE ARE TRUE:
+  1. You can name at least ONE specific ticker from the holdings
+     list above in "affected_stocks". If you cannot name one, the
+     market is NOT relevant.
+  2. The market has a specific catalyst (regulation, earnings,
+     launch, ruling, decision) — not a generic price movement.
+  3. The market is not already fully priced in (reject probability
+     above 0.85 or below 0.15).
+
+REJECT THESE CATEGORIES ENTIRELY:
+  - Pure crypto price targets (e.g. "Will BTC reach $X?")
+  - Markets about private companies with no BIT Capital exposure
+    (SpaceX, Anthropic, OpenAI as standalones — note: OpenAI IS
+    relevant via MSFT exposure)
+  - Sports, entertainment, weather, celebrity markets
+  - Pure geopolitical hypotheticals with no clear equity read-through
+  - Markets resolving in less than 12 hours
+
+FEW-SHOT EXAMPLES:
+
+Market: "Will the Fed cut rates by June 2026?"
+Output: {
+  "is_relevant": true, "confidence": 0.85,
+  "reason": "Direct macro signal for tech multiples; rate cuts benefit
+             growth equity valuations across BIT Capital's core holdings.",
+  "affected_stocks": ["MSFT", "GOOGL", "META", "NVDA"],
+  "signal_type": "macro", "signal_direction": "positive",
+  "urgency": "high", "thematic_buckets": ["Macro/Rates", "Big Tech Platforms"],
+  "is_ahead_of_curve": false
+}
+
+Market: "Will TSMC announce Arizona fab delay before Q3?"
+Output: {
+  "is_relevant": true, "confidence": 0.82,
+  "reason": "Supply chain disruption for advanced node capacity directly
+             impacts NVDA, AMD, and AAPL production timelines.",
+  "affected_stocks": ["TSM", "NVDA", "AMD", "AAPL"],
+  "signal_type": "supply_chain", "signal_direction": "negative",
+  "urgency": "medium", "thematic_buckets": ["Semiconductors"],
+  "is_ahead_of_curve": true
+}
+
+Market: "Will Bitcoin be above $76,000 on May 10?"
+Output: {
+  "is_relevant": false, "confidence": 0.95,
+  "reason": "Pure crypto price target with no specific catalyst.
+             No BIT Capital ticker has direct exposure to this outcome.",
+  "affected_stocks": [], "signal_type": null,
+  "signal_direction": null, "urgency": null,
+  "thematic_buckets": [], "is_ahead_of_curve": false
+}
+
+Return a JSON object with a "signals" array containing one analyzed
+signal per input market, in the same order.
+```
+
+The three-criteria framework (specific ticker, specific catalyst, not already priced in) was arrived at after two failed iterations — see [PROJECT_LEARNINGS.md](./PROJECT_LEARNINGS.md) for a full account of the filter evolution and its failure modes.
+
+---
+
 ## What I'd build next
 
 Documented in detail in [PROJECT_LEARNINGS.md](./PROJECT_LEARNINGS.md). Short list:
@@ -288,6 +380,6 @@ Documented in detail in [PROJECT_LEARNINGS.md](./PROJECT_LEARNINGS.md). Short li
 ## Built by
 
 **Amr Emara** — M.Eng. Integrated Design (Computational Design), TH OWL.
-Founder of [Lantern Studio](https://lantern-studio.de) — AI visualization SaaS for interior designers.
+Founder of [Lantern Studio](https://lantern-studio.de) — built and shipped an AI-powered SaaS product for architectural visualization, serving paying customers.
 
 For BIT Capital, May 2026.
