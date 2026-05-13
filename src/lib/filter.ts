@@ -118,56 +118,62 @@ type MutableSignalRow = Record<string, unknown> & {
   market_id: string;
 };
 
-const SYSTEM_PROMPT = `You are a senior research analyst at BIT Capital, a Berlin-based
+const SYSTEM_PROMPT = `You are an extraction assistant for BIT Capital, a Berlin-based
 asset manager focused on global technology equities. Your job is
-to filter Polymarket prediction markets for genuine investment
-signals.
+to extract structured information about each Polymarket prediction
+market — NOT to decide whether it is "worth trading." Code-level
+gates downstream will make the final relevance decision based on
+your extracted fields.
 
 BIT CAPITAL HOLDINGS (the only tickers you may use):
 NVDA, MSFT, GOOGL, GOOG, META, AAPL, AMZN, AMD, ASML, TSM,
 ORCL, ADBE, CRM, NOW, PLTR, ARM, AVGO, QCOM, INTC, MU, NFLX,
 SHOP, COIN
 
-A MARKET IS RELEVANT ONLY IF ALL THREE ARE TRUE:
+YOUR JOB IS SIMPLE:
 
-1. You can name at least ONE specific ticker from the holdings
-   list above in "affected_stocks". If you cannot name one,
-   the market is NOT relevant.
+For each market, name the BIT Capital holdings whose share price
+would plausibly respond to this market's outcome. Be GENEROUS in
+naming tickers — if there's any reasonable read-through, include
+the ticker. The code gates downstream will filter for quality;
+your job is to ensure no real signal is missed.
 
-   For MACRO events that affect tech multiples broadly (Fed rate
-   decisions, CPI prints, jobs reports, tariff announcements,
-   AI regulation, export controls, antitrust rulings), assign
-   the most exposed BIT Capital holdings: typically MSFT, GOOGL,
-   META, NVDA, AAPL. Do NOT leave affected_stocks empty just
-   because the catalyst is macro rather than company-specific.
+MARK is_relevant = true IF:
+- The market mentions or affects any company/sector/macro factor
+  that has read-through to ANY ticker in the holdings list above.
+- Examples of "read-through": competitive dynamics, supply chain,
+  regulatory pressure, macro multiples, M&A activity, AI capability
+  benchmarks (matters for MSFT/GOOGL/META/NVDA).
 
-2. The market has a SPECIFIC CATALYST. Any of these qualify:
-   - Company event: earnings, product launch, M&A, IPO
-   - Regulatory: ruling, antitrust action, approval, policy change
-   - Macro: Fed decision, CPI/inflation, jobs report, GDP
-   - Geopolitical: tariff, export control, sanctions, trade deal
-   - Supply chain: fab opening/delay, capacity announcement
-   Generic price movements ("will NVDA close above $X?") do NOT
-   qualify — those are not catalysts, they are price targets.
+MARK is_relevant = false ONLY IF:
+- The market is about sports, entertainment, weather, celebrities.
+- The market is a pure crypto price target ("Will BTC reach $X?")
+  AND there is no spillover to COIN.
+- The market is about a private company (SpaceX, xAI, Anthropic)
+  with NO read-through to public holdings. Note: Anthropic affects
+  GOOGL/AMZN (investors); OpenAI affects MSFT (investor + Azure).
+- The market is a direct price-target on a stock ("Will NVDA hit
+  $X?") — this restates pricing, not a catalyst.
 
-3. The market is not already fully priced in (reject probability
-   above 0.85 or below 0.15).
+GUIDANCE FOR MACRO MARKETS:
 
-REJECT THESE CATEGORIES ENTIRELY:
-- Pure crypto price targets ("Will BTC reach $X?", "Will ETH hit Y?")
-- Direct equity price-target markets ("Will NVDA hit $250 by Q3?")
-- Markets about private companies with no BIT Capital exposure
-  (SpaceX, Anthropic, xAI as standalones — note: OpenAI IS
-  relevant via MSFT exposure)
-- Sports, entertainment, weather, celebrity markets
-- Pure geopolitical hypotheticals with no clear equity read-through
-- Markets resolving in less than 24 hours
+Fed rate decisions, CPI prints, jobs reports, tariff announcements,
+AI regulation, antitrust rulings, and export controls all affect
+tech multiples. For these, name the MOST EXPOSED holdings:
+- Rates/macro/recession → MSFT, GOOGL, META, NVDA, AAPL
+- AI regulation → MSFT, GOOGL, META, NVDA
+- China/Taiwan/export controls → NVDA, AMD, ASML, TSM, AAPL
+- Antitrust → the named company (AAPL, GOOGL, AMZN, META)
 
-CONFIDENCE CALIBRATION:
-- 0.80+: Strong direct read-through to a named holding's near-term P&L
-- 0.65-0.79: Clear thematic exposure with identified ticker(s)
-- 0.50-0.64: Plausible read-through but uncertainty in magnitude or timing
-- Below 0.50: Don't mark relevant — the case is too weak
+CONFIDENCE: Reflects how confident you are in the read-through.
+- 0.80+: Direct, named company event with clear near-term P&L impact.
+- 0.65-0.79: Strong thematic exposure with identified ticker(s).
+- 0.50-0.64: Plausible read-through, real but indirect.
+- Below 0.50: Very weak connection — but still try to name tickers.
+
+Do NOT set is_relevant = false purely because you are uncertain.
+Use confidence for that. Code gates will reject low-confidence
+or weak-ticker cases automatically.
 
 FEW-SHOT EXAMPLES:
 Market: "Will the Fed cut rates by June 2026?"
@@ -253,81 +259,84 @@ universe. Not a tech sector signal.",
 Return a JSON object with a "signals" array containing one
 analyzed signal per input market, in the same order.`;
 
-// Per-pipeline-run counters for diagnostic logging
+// Per-pipeline-run counters for diagnostic logging.
+// The LLM no longer gatekeeps relevance — code does — so there is no
+// "llm_rejected" bucket. Every rejection happens at one of these gates.
 const rejectionStats = {
-  llm_rejected: 0,
   no_stocks: 0,
-  low_confidence: 0,
   no_valid_ticker: 0,
   probability_extreme: 0,
   expires_soon: 0,
   price_target: 0,
+  low_confidence: 0,
   passed: 0,
 };
 
 function resetRejectionStats() {
-  rejectionStats.llm_rejected = 0;
   rejectionStats.no_stocks = 0;
-  rejectionStats.low_confidence = 0;
   rejectionStats.no_valid_ticker = 0;
   rejectionStats.probability_extreme = 0;
   rejectionStats.expires_soon = 0;
   rejectionStats.price_target = 0;
+  rejectionStats.low_confidence = 0;
   rejectionStats.passed = 0;
 }
 
 function logRejectionStats() {
   console.log(`[Filter] === Rejection breakdown ===`);
-  console.log(`[Filter]   LLM said not relevant:     ${rejectionStats.llm_rejected}`);
   console.log(`[Filter]   No affected_stocks:        ${rejectionStats.no_stocks}`);
-  console.log(`[Filter]   Confidence < 0.50:         ${rejectionStats.low_confidence}`);
   console.log(`[Filter]   No valid ticker:           ${rejectionStats.no_valid_ticker}`);
   console.log(`[Filter]   Probability outside 15-85: ${rejectionStats.probability_extreme}`);
   console.log(`[Filter]   Expires within 24h:        ${rejectionStats.expires_soon}`);
   console.log(`[Filter]   Direct price-target:       ${rejectionStats.price_target}`);
+  console.log(`[Filter]   Confidence < 0.45:         ${rejectionStats.low_confidence}`);
   console.log(`[Filter]   PASSED:                    ${rejectionStats.passed}`);
 }
 
 function enforceValidation(signal: ParsedSignal, market: MarketForAnalysis): ParsedSignal {
-  // If LLM already said not relevant, count it and return as-is.
-  if (!signal.is_relevant) {
-    rejectionStats.llm_rejected += 1;
-    return signal;
-  }
+  // ARCHITECTURE: The CODE is the relevance judge, not the LLM.
+  // The LLM is used only as an extractor. We compute is_relevant from
+  // the structured fields (affected_stocks, confidence) plus market
+  // properties (probability, end_date, question shape). This sidesteps
+  // the LLM's documented tendency to mark valid signals as not-relevant
+  // out of misplaced caution (see PROJECT_LEARNINGS.md "Specific failure
+  // modes" — self-contradictory output across fields).
 
-  // HARD RULE 1: No affected_stocks = NOT relevant
-  if (!signal.affected_stocks ||
-      signal.affected_stocks.length === 0 ||
-      signal.affected_stocks.includes('None') ||
-      signal.affected_stocks.includes('NONE')) {
-    rejectionStats.no_stocks += 1;
-    console.log(`[Filter] REJECT no_stocks: "${market.question.substring(0, 80)}" | LLM said relevant but named no tickers`);
-    return { ...signal, is_relevant: false };
-  }
-
-  // HARD RULE 2: Confidence below 0.50 = NOT relevant.
-  // Lowered from 0.55 because gpt-4o-mini anchors at 0.5 for marginal cases
-  // and was killing legitimate macro signals at 0.50-0.54.
-  if (signal.confidence < 0.50) {
-    rejectionStats.low_confidence += 1;
-    console.log(`[Filter] REJECT low_confidence (${signal.confidence}): "${market.question.substring(0, 80)}"`);
-    return { ...signal, is_relevant: false };
-  }
-
-  // HARD RULE 3: Ticker must be in BIT Capital holdings whitelist
   const HOLDINGS = [
     'NVDA','MSFT','GOOGL','GOOG','META','AAPL','AMZN','AMD',
     'ASML','TSM','ORCL','ADBE','CRM','NOW','PLTR','ARM',
     'AVGO','QCOM','INTC','MU','NFLX','SHOP','COIN',
   ];
-  const validTickers = (signal.affected_stocks || []).filter(t => HOLDINGS.includes(t));
+
+  // STAGE 1: Sanity-clean the LLM's structured output.
+  const rawStocks = (signal.affected_stocks || []).filter(
+    (t) => t && t !== 'None' && t !== 'NONE'
+  );
+  const validTickers = rawStocks.filter((t) => HOLDINGS.includes(t));
+
+  // Compute a base "should be relevant" from the structured signals.
+  // Confidence here is the LLM's own self-rating — we still trust this
+  // as a noisiness signal, but no longer trust its is_relevant verdict.
+  const confidence = typeof signal.confidence === 'number' ? signal.confidence : 0;
+
+  // STAGE 2: Apply hard code gates in priority order.
+  // First, hard architectural rejects (gates 1, 3, 4, 5, 6).
+  // Then, soft quality rejects (gate 2 — low confidence).
+
+  // GATE 1: Must have at least one valid BIT Capital ticker.
   if (validTickers.length === 0) {
-    rejectionStats.no_valid_ticker += 1;
-    console.log(`[Filter] REJECT no_valid_ticker: "${market.question.substring(0, 80)}" | LLM named ${JSON.stringify(signal.affected_stocks)} — none in holdings list`);
-    return { ...signal, is_relevant: false };
+    if (rawStocks.length > 0) {
+      // LLM tried to name tickers but none are in our universe.
+      rejectionStats.no_valid_ticker += 1;
+      console.log(`[Filter] REJECT no_valid_ticker: "${market.question.substring(0, 80)}" | LLM named ${JSON.stringify(rawStocks)} — none in holdings list`);
+    } else {
+      rejectionStats.no_stocks += 1;
+      console.log(`[Filter] REJECT no_stocks: "${market.question.substring(0, 80)}"`);
+    }
+    return { ...signal, affected_stocks: validTickers, is_relevant: false };
   }
 
-  // HARD RULE 4: Probability outside 15–85% informational edge window.
+  // GATE 4: Probability outside 15–85% informational edge window.
   const prob = market.probability ?? 0.5;
   if (prob > 0.85 || prob < 0.15) {
     rejectionStats.probability_extreme += 1;
@@ -340,7 +349,7 @@ function enforceValidation(signal: ParsedSignal, market: MarketForAnalysis): Par
     };
   }
 
-  // HARD RULE 5: Markets expiring within 24 hours — no actionable window.
+  // GATE 5: Markets expiring within 24 hours — no actionable window.
   if (market.end_date) {
     const hoursRemaining = (new Date(market.end_date).getTime() - Date.now()) / (1000 * 60 * 60);
     if (hoursRemaining < 24) {
@@ -355,15 +364,15 @@ function enforceValidation(signal: ParsedSignal, market: MarketForAnalysis): Par
     }
   }
 
-  // HARD RULE 6: Direct equity price-target ("Will NVDA hit (HIGH) $224?").
+  // GATE 6: Direct equity price-target ("Will NVDA hit (HIGH) $224?").
   const q = market.question.toLowerCase();
-  const hasTicker = /\([a-z]{1,5}\)|\b(aapl|amzn|googl|goog|meta|msft|nvda|amd|avgo|asml)\b/i.test(market.question);
+  const hasTickerInQ = /\([a-z]{1,5}\)|\b(aapl|amzn|googl|goog|meta|msft|nvda|amd|avgo|asml)\b/i.test(market.question);
   const hasPriceLevel = /\$\d+/.test(market.question);
   const hasPriceAction =
     q.includes('hit (high)') || q.includes('hit (low)') ||
     q.includes('close above') || q.includes('close below') ||
     q.includes('hit $') || q.includes('finish week');
-  if (hasTicker && hasPriceLevel && hasPriceAction) {
+  if (hasTickerInQ && hasPriceLevel && hasPriceAction) {
     rejectionStats.price_target += 1;
     console.log(`[Filter] REJECT price_target: "${market.question.substring(0, 80)}"`);
     return {
@@ -374,9 +383,23 @@ function enforceValidation(signal: ParsedSignal, market: MarketForAnalysis): Par
     };
   }
 
+  // GATE 2: Confidence floor (soft quality gate, applied last).
+  // Lowered from 0.55 → 0.45 because gpt-4o-mini anchors low for marginal cases.
+  if (confidence < 0.45) {
+    rejectionStats.low_confidence += 1;
+    console.log(`[Filter] REJECT low_confidence (${confidence}): "${market.question.substring(0, 80)}"`);
+    return { ...signal, affected_stocks: validTickers, is_relevant: false };
+  }
+
+  // ALL GATES PASSED → the CODE marks this relevant, regardless of
+  // what the LLM thought. Trust the structured extraction.
   rejectionStats.passed += 1;
-  console.log(`[Filter] PASS: "${market.question.substring(0, 80)}" | ${validTickers.join(',')} | conf=${signal.confidence}`);
-  return { ...signal, affected_stocks: validTickers };
+  console.log(`[Filter] PASS: "${market.question.substring(0, 80)}" | ${validTickers.join(',')} | conf=${confidence}`);
+  return {
+    ...signal,
+    affected_stocks: validTickers,
+    is_relevant: true,
+  };
 }
 
 function getMissingColumn(message: string) {
