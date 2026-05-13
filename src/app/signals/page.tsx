@@ -29,6 +29,8 @@ type MarketInfo = {
   end_date?: string | null;
   slug?: string | null;
   market_url?: string | null;
+  fetched_at?: string | null;
+  last_updated_at?: string | null;
 };
 
 type SignalRow = {
@@ -47,10 +49,53 @@ type SignalRow = {
   is_ahead_of_curve: boolean | null;
 };
 
+function getSignalMarket(signal: SignalRow): MarketInfo | null {
+  return Array.isArray(signal.markets) ? signal.markets[0] ?? null : signal.markets;
+}
+
+function getMarketFreshnessAt(market: MarketInfo | null): string | null {
+  return market?.last_updated_at ?? market?.fetched_at ?? null;
+}
+
+function MarketFreshness({ market }: { market: MarketInfo | null }) {
+  const timestamp = getMarketFreshnessAt(market);
+  if (!timestamp) return null;
+
+  return (
+    <span title={formatFullTimestamp(timestamp)} className="text-xs text-[#6b7280] whitespace-nowrap">
+      as of {formatRelativeTime(timestamp)}
+    </span>
+  );
+}
+
+function isMissingFreshnessColumn(error: { message?: string } | null) {
+  return Boolean(error?.message?.includes('last_updated_at'));
+}
+
+function hasAheadOfCurveCriteria(signal: SignalRow): boolean {
+  const market = getSignalMarket(signal);
+  const probability = market?.probability;
+  const volume = market?.volume ?? 0;
+  const change = signal.probability_change;
+
+  return (
+    Boolean(signal.is_ahead_of_curve) &&
+    typeof probability === 'number' &&
+    Number.isFinite(probability) &&
+    probability >= 0.25 &&
+    probability <= 0.75 &&
+    volume > 50_000 &&
+    change !== null &&
+    Math.abs(change) > 0.15
+  );
+}
+
 export default function SignalsPage() {
   const [signals, setSignals] = useState<SignalRow[]>([]);
+  const [relevantSignalCount, setRelevantSignalCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [, setTick] = useState(0);
 
   // Filters — Movement filter removed pending reliable probability_change
   // detection across ingest cycles.
@@ -58,10 +103,29 @@ export default function SignalsPage() {
   const [filterUrgency, setFilterUrgency] = useState('All');
   const [filterType, setFilterType] = useState('All');
   const [search, setSearch] = useState('');
+  const [aheadOfCurveOnly, setAheadOfCurveOnly] = useState(false);
+
+  useEffect(() => {
+    const id = setInterval(() => setTick((tick) => tick + 1), 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    setAheadOfCurveOnly(params.get('ahead_of_curve') === 'true');
+  }, []);
 
   useEffect(() => {
     async function fetchSignals() {
-      const { data: signalData, error } = await supabase
+      const countRes = await fetch(`/api/signals/count?t=${Date.now()}`, { cache: 'no-store' });
+      const countData = await countRes.json();
+      if (countData.success) {
+        setRelevantSignalCount(Number(countData.count ?? 0));
+      } else {
+        console.error('[Signals] Relevant count fetch error:', countData.error ?? 'Unknown error');
+      }
+
+      let { data: signalData, error } = await supabase
         .from('signals')
         .select(`
           *,
@@ -73,10 +137,36 @@ export default function SignalsPage() {
             category,
             end_date,
             slug,
-            market_url
+            market_url,
+            last_updated_at,
+            fetched_at
           )
         `)
-        .order('analyzed_at', { ascending: false });
+        .order('analyzed_at', { ascending: false })
+        .range(0, 9999);
+
+      if (isMissingFreshnessColumn(error)) {
+        const fallback = await supabase
+          .from('signals')
+          .select(`
+            *,
+            markets (
+              id,
+              question,
+              probability,
+              volume,
+              category,
+              end_date,
+              slug,
+              market_url,
+              fetched_at
+            )
+          `)
+          .order('analyzed_at', { ascending: false })
+          .range(0, 9999);
+        signalData = fallback.data;
+        error = fallback.error;
+      }
 
       if (error) console.error('[Signals] Supabase fetch error:', error.message);
       const rows = (signalData ?? []) as unknown as SignalRow[];
@@ -89,13 +179,21 @@ export default function SignalsPage() {
   }, []);
 
   const filteredSignals = signals.filter(s => {
-    const m = Array.isArray(s.markets) ? s.markets[0] : s.markets;
+    const m = getSignalMarket(s);
     if (filterRelevant === 'relevant' && !s.is_relevant) return false;
     if (filterUrgency !== 'All' && s.urgency?.toLowerCase() !== filterUrgency.toLowerCase()) return false;
     if (filterType !== 'All' && s.signal_type?.toLowerCase() !== filterType.toLowerCase()) return false;
+    if (aheadOfCurveOnly && !hasAheadOfCurveCriteria(s)) return false;
     if (search && !m?.question?.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
+  const usingExactRelevantCount =
+    filterRelevant === 'relevant' &&
+    filterUrgency === 'All' &&
+    filterType === 'All' &&
+    !aheadOfCurveOnly &&
+    search.trim() === '';
+  const visibleResultCount = usingExactRelevantCount ? relevantSignalCount : filteredSignals.length;
 
   return (
     <div className="space-y-6">
@@ -143,8 +241,19 @@ export default function SignalsPage() {
           <option value="Sector">Sector</option>
         </select>
 
+        <button
+          type="button"
+          aria-pressed={aheadOfCurveOnly}
+          onClick={() => setAheadOfCurveOnly((value) => !value)}
+          className={`bg-[#0a0f1e] border rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-[#3b82f6] ${
+            aheadOfCurveOnly ? 'border-[#3b82f6]' : 'border-[#1f2937]'
+          }`}
+        >
+          Ahead of Curve only
+        </button>
+
         <div className="ml-auto text-sm text-[#9ca3af]">
-          Showing {filteredSignals.length} results
+          Showing {visibleResultCount} results
         </div>
       </div>
 
@@ -176,13 +285,14 @@ export default function SignalsPage() {
             </thead>
             <tbody className="divide-y divide-[#1f2937]">
               {filteredSignals.map((s, index) => {
-                const m = Array.isArray(s.markets) ? s.markets[0] : s.markets;
+                const m = getSignalMarket(s);
                 const question = m?.question || 'Untitled market';
                 const reason = s.reason || 'No analysis reason available.';
                 const prob = (m?.probability || 0) * 100;
                 const isExpanded = expandedId === s.id;
                 const hasPreviewOverflow = question.length > 42 || reason.length > 58;
                 const marketUrl = resolveMarketUrl(m);
+                const isAheadOfCurve = hasAheadOfCurveCriteria(s);
 
                 return (
                   <React.Fragment key={s.id}>
@@ -200,7 +310,7 @@ export default function SignalsPage() {
                               {question}
                             </span>
                             {marketUrl && <MarketLinkIcon url={marketUrl} />}
-                            <AheadOfCurveBadge flagged={s.is_ahead_of_curve} />
+                            <AheadOfCurveBadge flagged={isAheadOfCurve} />
                           </div>
                           <div className="mt-1 flex items-center gap-2 text-xs">
                             <span className="min-w-0 truncate text-[#9ca3af]" title={reason}>
@@ -224,9 +334,12 @@ export default function SignalsPage() {
                       </td>
                       <td className="px-4 py-4">
                         <div className="flex flex-col gap-1">
-                          <span className={`font-mono ${prob > 60 ? 'text-[#10b981]' : prob > 40 ? 'text-[#f59e0b]' : 'text-[#ef4444]'}`}>
-                            {prob.toFixed(1)}%
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <span className={`font-mono ${prob > 60 ? 'text-[#10b981]' : prob > 40 ? 'text-[#f59e0b]' : 'text-[#ef4444]'}`}>
+                              {prob.toFixed(1)}%
+                            </span>
+                            <MarketFreshness market={m} />
+                          </div>
                           <ProbChangeBadge change={s.probability_change} />
                         </div>
                       </td>
@@ -267,9 +380,9 @@ export default function SignalsPage() {
                           )}
                         </div>
                       </td>
-                      <td className="px-4 py-4">
+                      <td className="px-4 py-4 min-w-[90px]">
                         {s.urgency && (
-                          <span className={`px-2.5 py-1 rounded-full text-xs font-semibold capitalize ${
+                          <span className={`inline-block whitespace-nowrap px-2.5 py-1 rounded-full text-xs font-semibold capitalize ${
                             s.urgency === 'high' ? 'bg-[#ef4444]/20 text-[#ef4444]' :
                             s.urgency === 'medium' ? 'bg-[#f59e0b]/20 text-[#f59e0b]' :
                             'bg-[#374151] text-gray-300'

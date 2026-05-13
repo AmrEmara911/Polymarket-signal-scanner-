@@ -1,59 +1,11 @@
 import { getAnalystConfig } from './analyst-config';
-import { BITCAP_RESEARCH_CONTEXT } from './bitcap';
 import { sortMarketsForAnalysis } from './market-prioritization';
-import { callOpenAIJson, getOpenAIModel } from './openai';
+import { callOpenAIJson } from './openai';
 import { getSupabaseClient } from './supabase';
 
-const BATCH_SIZE = 12;
+const BATCH_SIZE = 10;
 const MOVEMENT_BASELINE_MIN_AGE_MS = 6 * 60 * 60 * 1000;
 const MOVEMENT_THRESHOLD = 0.05;
-
-export type Sensitivity = 'strict' | 'balanced' | 'broad';
-
-const SENSITIVITY_PROMPTS: Record<Sensitivity, string> = {
-  strict: `
----
-SENSITIVITY MODE: STRICT — expected output: 5–15 relevant signals per 100 markets.
-Raise your bar significantly. Mark is_relevant: true ONLY for:
-- Markets that directly name a BIT Capital holding by ticker: IREN, MSFT, GOOGL, META, NVDA, SOFI, RDDT, HIMS, LMND, HNGE, CRCL, APLD, COHR, GLXY, NTSK
-- Fed rate decisions and central bank policy shifts that directly reprice growth equities
-- Confirmed (not speculative) regulatory actions against a held company
-
-Everything else: is_relevant: false. When in doubt, reject. High conviction only.`,
-
-  balanced: `
----
-SENSITIVITY MODE: BALANCED — expected output: 15–30 relevant signals per 100 markets.
-This is the default mode. Apply the three-criteria framework and the REJECT list above exactly.`,
-
-  broad: `
----
-SENSITIVITY MODE: BROAD — expected output: 30–60 relevant signals per 100 markets.
-Cast a wide net. Mark is_relevant: true for anything that could plausibly affect tech equities, including:
-- Adjacent sectors: digital advertising, healthcare IT, data-center energy policy, logistics tech
-- Competitor events that could shift dynamics for holdings (rival IPO, competitor regulatory setback)
-- Macro events with a multi-step path to tech equity valuations
-- Geopolitical events with indirect semiconductor or supply-chain implications
-- Speculative connections: if you can draw a 2-step chain from the event to a portfolio holding, include it
-
-When in doubt, include the signal. Flag uncertainty in the reason field.`,
-};
-
-interface MarketForAnalysis {
-  id: string;
-  question: string;
-  description: string | null;
-  probability: number | null;
-  volume: number | null;
-  liquidity: number | null;
-  category: string | null;
-  end_date: string | null;
-  candidate_score?: number;
-  candidate_reasons?: string[];
-  candidate_noise?: string[];
-  probability_change?: number | null; // vs 24h ago (fractional, e.g. 0.15 = +15pp)
-  is_moving?: boolean | null;
-}
 
 /** Canonical BIT Capital thematic buckets — also referenced in the LLM prompt. */
 export const THEMATIC_BUCKETS = [
@@ -67,22 +19,13 @@ export const THEMATIC_BUCKETS = [
 ] as const;
 
 export type ThematicBucket = (typeof THEMATIC_BUCKETS)[number];
-const VALID_BUCKETS_SET = new Set<string>(THEMATIC_BUCKETS);
 
-/**
- * Deterministic ticker → bucket mapping. Used as a safety net so signals about
- * known portfolio holdings still get tagged even when the LLM forgets to fill
- * the thematic_buckets field. A holding can map to multiple buckets (e.g.
- * IREN is both AI Infrastructure and Digital Assets).
- */
 const STOCK_TO_BUCKETS: Record<string, ThematicBucket[]> = {
-  // Tier 1
   IREN: ['AI Infrastructure', 'Digital Assets'],
   MSFT: ['Big Tech Platforms'],
   GOOGL: ['Big Tech Platforms'],
   META: ['Big Tech Platforms'],
   NVDA: ['AI Infrastructure'],
-  // Tier 2
   AMD: ['AI Infrastructure'],
   AMZN: ['Big Tech Platforms'],
   AAPL: ['Big Tech Platforms'],
@@ -91,20 +34,17 @@ const STOCK_TO_BUCKETS: Record<string, ThematicBucket[]> = {
   LMND: ['Fintech', 'Digital Health'],
   HNGE: ['Digital Health'],
   SOFI: ['Fintech'],
-  // Tier 3
   CRCL: ['Fintech', 'Digital Assets'],
   APLD: ['AI Infrastructure'],
   COHR: ['AI Infrastructure'],
   GLXY: ['Digital Assets'],
   NTSK: ['Cybersecurity'],
-  // Generic crypto tickers
   BTC: ['Digital Assets'],
   ETH: ['Digital Assets'],
   BITCOIN: ['Digital Assets'],
   ETHEREUM: ['Digital Assets'],
 };
 
-/** Infer buckets from affected_stocks list. Used as a safety net. */
 export function inferBucketsFromStocks(stocks: string[] | null | undefined): ThematicBucket[] {
   if (!Array.isArray(stocks)) return [];
   const out = new Set<ThematicBucket>();
@@ -115,7 +55,6 @@ export function inferBucketsFromStocks(stocks: string[] | null | undefined): The
   return Array.from(out);
 }
 
-/** Macro signal_type values always touch the Macro/Rates bucket. */
 export function inferBucketsFromSignalType(
   signalType: string | null | undefined
 ): ThematicBucket[] {
@@ -127,29 +66,40 @@ export function inferBucketsFromSignalType(
   return [];
 }
 
-interface RawSignal {
+
+interface MarketForAnalysis {
+  id: string;
+  question: string;
+  description: string | null;
+  probability: number | null;
+  probability_24h_ago?: number | string | null;
+  volume: number | null;
+  liquidity: number | null;
+  category: string | null;
+  end_date: string | null;
+  last_updated_at?: string | null;
+  candidate_score?: number;
+  candidate_reasons?: string[];
+  candidate_noise?: string[];
+  probability_change?: number | null;
+  is_moving?: boolean | null;
+}
+
+export interface ParsedSignal {
   market_id: string;
   is_relevant: boolean;
-  relevance_score: number;
   confidence: number;
   reason: string;
   affected_stocks: string[];
-  affected_sectors: string[];
-  signal_type: 'macro' | 'rates' | 'tariff' | 'regulatory' | 'company' | 'sector' | 'crypto' | null;
+  signal_type: 'macro' | 'rates' | 'tariff' | 'regulatory' | 'company' | 'sector' | 'crypto' | 'supply_chain' | null;
   signal_direction: 'positive' | 'negative' | 'mixed' | 'unclear' | null;
-  urgency: 'high' | 'medium' | 'low';
-  thesis: string;
-  evidence: string[];
-  key_risks: string[];
-  suggested_action: string;
-  probability_change?: number | null; // set post-LLM from snapshot data
-  is_moving?: boolean | null;
-  thematic_buckets?: string[]; // BIT Capital exposure tags
-  is_ahead_of_curve?: boolean; // contested range + sharp move + credible vol
+  urgency: 'high' | 'medium' | 'low' | null;
+  thematic_buckets: string[];
+  is_ahead_of_curve: boolean;
 }
 
 interface OpenAISignalResponse {
-  signals: RawSignal[];
+  signals: ParsedSignal[];
 }
 
 export interface AnalyzeResult {
@@ -157,296 +107,215 @@ export interface AnalyzeResult {
   relevant: number;
 }
 
-type SignalRow = RawSignal & {
+type SignalRow = ParsedSignal & {
   model?: string;
   analyzed_at: string;
+  probability_change?: number | null;
+  is_moving?: boolean | null;
 };
 
 type MutableSignalRow = Record<string, unknown> & {
   market_id: string;
 };
 
-function clamp(value: unknown, fallback: number) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return fallback;
-  return Math.max(0, Math.min(1, number));
+const SYSTEM_PROMPT = `You are a senior research analyst at BIT Capital, a Berlin-based
+asset manager focused on global technology equities. Your job is
+to filter Polymarket prediction markets for genuine investment
+signals.
+BIT CAPITAL HOLDINGS (the only tickers you may use):
+NVDA, MSFT, GOOGL, GOOG, META, AAPL, AMZN, AMD, ASML, TSM,
+ORCL, ADBE, CRM, NOW, PLTR, ARM, AVGO, QCOM, INTC, MU, NFLX,
+SHOP, COIN
+A MARKET IS RELEVANT ONLY IF ALL THREE ARE TRUE:
+
+You can name at least ONE specific ticker from the holdings
+list above in "affected_stocks". If you cannot name one, the
+market is NOT relevant.
+The market has a specific catalyst (regulation, earnings,
+launch, ruling, decision) — not a generic price movement.
+The market is not already fully priced in (reject probability
+above 0.85 or below 0.15).
+
+REJECT THESE CATEGORIES ENTIRELY:
+
+Pure crypto price targets (e.g. "Will BTC reach $X?")
+Markets about private companies with no BIT Capital exposure
+(SpaceX, Anthropic, OpenAI as standalones — note: OpenAI IS
+relevant via MSFT exposure)
+Sports, entertainment, weather, celebrity markets
+Pure geopolitical hypotheticals with no clear equity read-through
+Markets resolving in less than 12 hours
+
+FEW-SHOT EXAMPLES:
+Market: "Will the Fed cut rates by June 2026?"
+Output: {
+"is_relevant": true,
+"confidence": 0.85,
+"reason": "Direct macro signal for tech multiples; rate cuts
+benefit growth equity valuations across BIT Capital's core
+holdings.",
+"affected_stocks": ["MSFT", "GOOGL", "META", "NVDA"],
+"signal_type": "macro",
+"signal_direction": "positive",
+"urgency": "high",
+"thematic_buckets": ["Macro/Rates", "Big Tech Platforms"],
+"is_ahead_of_curve": false
 }
-
-function isDirectEquityPriceMarket(question: string) {
-  const text = question.toLowerCase();
-  const hasTicker = /\([a-z]{1,5}\)|\b(aapl|amzn|googl|meta|msft|nvda|amd|avgo|asml|amat|lrcx|crm|pypl|coin|mstr)\b/i.test(
-    question
-  );
-  const hasPriceLevel = /\$\d+/.test(question);
-  const hasPriceAction =
-    text.includes('close above') ||
-    text.includes('close below') ||
-    text.includes('finish week') ||
-    text.includes('hit (high)') ||
-    text.includes('hit (low)') ||
-    text.includes('hit $');
-
-  return hasTicker && hasPriceLevel && hasPriceAction;
+Market: "Will TSMC announce Arizona fab delay before Q3?"
+Output: {
+"is_relevant": true,
+"confidence": 0.82,
+"reason": "Supply chain disruption for advanced node capacity
+directly impacts NVDA, AMD, and AAPL production timelines.",
+"affected_stocks": ["TSM", "NVDA", "AMD", "AAPL"],
+"signal_type": "supply_chain",
+"signal_direction": "negative",
+"urgency": "medium",
+"thematic_buckets": ["Semiconductors"],
+"is_ahead_of_curve": true
 }
-
-function daysUntilExpiry(endDate: string | null): number {
-  if (!endDate) return Infinity;
-  return (new Date(endDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24);
+Market: "Will OpenAI IPO close above $800B market cap?"
+Output: {
+"is_relevant": true,
+"confidence": 0.78,
+"reason": "MSFT holds a significant equity stake in OpenAI.
+An $800B+ IPO valuation has direct read-through to MSFT's
+book value and AI infrastructure thesis.",
+"affected_stocks": ["MSFT"],
+"signal_type": "company",
+"signal_direction": "positive",
+"urgency": "high",
+"thematic_buckets": ["AI Infrastructure", "Big Tech Platforms"],
+"is_ahead_of_curve": false
 }
+Market: "Will Bitcoin be above $76,000 on May 10?"
+Output: {
+"is_relevant": false,
+"confidence": 0.95,
+"reason": "Pure crypto price target with no specific catalyst.
+No BIT Capital ticker has direct exposure to this outcome.",
+"affected_stocks": [],
+"signal_type": null,
+"signal_direction": null,
+"urgency": null,
+"thematic_buckets": [],
+"is_ahead_of_curve": false
+}
+Market: "Will SpaceX IPO above $1.4T?"
+Output: {
+"is_relevant": false,
+"confidence": 0.90,
+"reason": "SpaceX is private. No BIT Capital holding has
+material direct exposure to SpaceX's valuation.",
+"affected_stocks": [],
+"signal_type": null,
+"signal_direction": null,
+"urgency": null,
+"thematic_buckets": [],
+"is_ahead_of_curve": false
+}
+Market: "Will GameStop acquire eBay?"
+Output: {
+"is_relevant": false,
+"confidence": 0.95,
+"reason": "Neither company is in BIT Capital's tech holdings
+universe. Not a tech sector signal.",
+"affected_stocks": [],
+"signal_type": null,
+"signal_direction": null,
+"urgency": null,
+"thematic_buckets": [],
+"is_ahead_of_curve": false
+}
+Return a JSON object with a "signals" array containing one
+analyzed signal per input market, in the same order.`;
 
-export function isAnalyticallyUseful(market: MarketForAnalysis): boolean {
-  const probability = market.probability;
-  if (typeof probability === 'number' && Number.isFinite(probability)) {
-    if (probability >= 0.95 || probability <= 0.05) return false;
+function enforceValidation(signal: ParsedSignal, market: MarketForAnalysis): ParsedSignal {
+  // HARD RULE 1: No affected_stocks = NOT relevant
+  if (signal.is_relevant &&
+      (!signal.affected_stocks ||
+       signal.affected_stocks.length === 0 ||
+       signal.affected_stocks.includes('None') ||
+       signal.affected_stocks.includes('NONE'))) {
+    return { ...signal, is_relevant: false };
   }
 
-  if (market.end_date) {
-    const endTime = new Date(market.end_date).getTime();
-    const hoursUntilEnd = (endTime - Date.now()) / (1000 * 60 * 60);
-    if (Number.isFinite(hoursUntilEnd) && hoursUntilEnd < 24) return false;
+  // HARD RULE 2: Confidence below 0.55 = NOT relevant
+  if (signal.is_relevant && signal.confidence < 0.55) {
+    return { ...signal, is_relevant: false };
   }
 
-  const intradayPattern = /\b(up or down|\d+:\d+\s*(AM|PM)\s*-\s*\d+:\d+)/i;
-  if (intradayPattern.test(market.question)) return false;
-
-  return true;
-}
-
-function isAnnualProductCycleMarket(question: string): boolean {
-  const text = question.toLowerCase();
-  const hasReleaseVerb = /\b(release|launch|ship|announce|unveil|introduce)\b/.test(text);
-  const hasAnnualProduct =
-    /\b(iphone|ipad|macbook|mac pro|apple watch|galaxy s|galaxy z|pixel \d|surface pro|surface laptop|windows \d+|next (iphone|ipad|pixel|galaxy))\b/.test(text);
-  const hasYear = /\b(20\d{2})\b/.test(text);
-  return hasReleaseVerb && hasAnnualProduct && hasYear;
-}
-
-/**
- * Returns true for pure BTC/ETH price-target markets ("Will Bitcoin close above $X?").
- * These track price levels mechanically and offer no informational edge. Crypto
- * REGULATION markets (ETF approvals, SEC actions) are excluded via the isRegulatory
- * guard and remain eligible for analysis.
- */
-function isPureCryptoPriceMarket(question: string): boolean {
-  const text = question.toLowerCase();
-  const hasCryptoAsset = /\b(bitcoin|btc|ethereum|eth)\b/.test(text);
-  const hasPriceTarget = /\$[\d,]+(?:k|m)?/i.test(question);
-  const hasPriceAction = /\b(above|below|exceed|surpass|hit|reach|cross)\b/.test(text);
-  const isRegulatory = /\b(etf|sec|cftc|approval|inflow|license|legislation|ban|regulation)\b/.test(text);
-  return hasCryptoAsset && hasPriceTarget && hasPriceAction && !isRegulatory;
-}
-
-/**
- * Returns true when the market's end_date is within `hours` hours from now.
- */
-function expiresWithinHours(endDate: string | null, hours: number): boolean {
-  if (!endDate) return false;
-  return new Date(endDate).getTime() - Date.now() < hours * 60 * 60 * 1000;
-}
-
-function applyQualityGate(signal: RawSignal, market: MarketForAnalysis): RawSignal {
-  // Rule 1: pure BTC/ETH price-target markets — no catalyst, no informational edge.
-  if (isPureCryptoPriceMarket(market.question)) {
-    return {
-      ...signal,
-      is_relevant: false,
-      relevance_score: 0.15,
-      confidence: 0.8,
-      urgency: 'low',
-      reason:
-        'Pure crypto price-target market (BTC/ETH above/below $X) — tracks price levels mechanically with no discrete catalyst or informational edge.',
-      affected_stocks: [],
-      affected_sectors: [],
-      signal_type: null,
-      signal_direction: null,
-    };
+  // HARD RULE 3: Ticker must be in BIT Capital holdings whitelist
+  const HOLDINGS = [
+    'NVDA','MSFT','GOOGL','GOOG','META','AAPL','AMZN','AMD',
+    'ASML','TSM','ORCL','ADBE','CRM','NOW','PLTR','ARM',
+    'AVGO','QCOM','INTC','MU','NFLX','SHOP','COIN',
+  ];
+  const validTickers = (signal.affected_stocks || []).filter(t => HOLDINGS.includes(t));
+  if (signal.is_relevant && validTickers.length === 0) {
+    return { ...signal, is_relevant: false };
   }
 
-  // Rule 2: direct equity price targets restate market pricing, not catalysts.
-  if (isDirectEquityPriceMarket(market.question)) {
-    return {
-      ...signal,
-      is_relevant: false,
-      relevance_score: Math.min(clamp(signal.relevance_score, 0.25), 0.35),
-      confidence: Math.max(clamp(signal.confidence, 0.7), 0.7),
-      urgency: 'low',
-      reason:
-        'Direct stock-price prediction markets are derivative of equity prices, not independent Polymarket signals for analysts.',
-      affected_stocks: [],
-      affected_sectors: [],
-      signal_type: null,
-      signal_direction: null,
-      thesis:
-        'This market describes where the stock trades but does not explain an external catalyst (rates, regulation, tariffs, supply chains, fundamentals).',
-      evidence: ['The question is framed around a ticker crossing a price level.'],
-      key_risks: ['Using this as a signal would double-count public equity market pricing.'],
-      suggested_action:
-        'Exclude from analyst report unless paired with a separate catalyst market that explains why the equity price should move.',
-    };
+  // HARD RULE 4: Probability outside 15–85% informational edge window.
+  // The LLM is instructed to reject these but sometimes ignores it.
+  // This code-level gate is the definitive enforcement.
+  if (signal.is_relevant) {
+    const prob = market.probability ?? 0.5;
+    if (prob > 0.85 || prob < 0.15) {
+      return {
+        ...signal,
+        affected_stocks: validTickers,
+        is_relevant: false,
+        reason: `Probability ${(prob * 100).toFixed(0)}% is outside the 15–85% informational edge window — outcome has reached consensus and is already priced into public markets.`,
+      };
+    }
   }
 
-  // Rule 3: markets expiring within 24 hours — no actionable window.
-  if (expiresWithinHours(market.end_date, 24)) {
-    return {
-      ...signal,
-      is_relevant: false,
-      relevance_score: 0.1,
-      urgency: 'low',
-      reason:
-        'Market expires within 24 hours — no actionable window for analyst positioning or portfolio adjustment.',
-      affected_stocks: [],
-      affected_sectors: [],
-      signal_type: null,
-      signal_direction: null,
-    };
+  // HARD RULE 5: Markets expiring within 24 hours — no actionable window.
+  if (signal.is_relevant && market.end_date) {
+    const hoursRemaining = (new Date(market.end_date).getTime() - Date.now()) / (1000 * 60 * 60);
+    if (hoursRemaining < 24) {
+      return {
+        ...signal,
+        affected_stocks: validTickers,
+        is_relevant: false,
+        reason: 'Market expires within 24 hours — no actionable window for analyst positioning.',
+      };
+    }
   }
 
-  // Rule 4: probability outside the informational edge range (>85% or <15%).
-  // Consensus has already formed — the outcome is priced into public markets.
-  const prob = market.probability ?? 0.5;
-  if (prob > 0.85 || prob < 0.15) {
-    return {
-      ...signal,
-      is_relevant: false,
-      relevance_score: Math.min(clamp(signal.relevance_score, 0.2), 0.30),
-      urgency: 'low',
-      reason: `Probability ${(prob * 100).toFixed(0)}% is outside the 15–85% informational edge window — outcome has reached consensus and is already priced into public markets.`,
-    };
+  // HARD RULE 6: Direct equity price-target ("Will NVDA hit (HIGH) $224?").
+  // These restate equity pricing rather than explaining a catalyst.
+  if (signal.is_relevant) {
+    const q = market.question.toLowerCase();
+    const hasTicker = /\([a-z]{1,5}\)|\b(aapl|amzn|googl|goog|meta|msft|nvda|amd|avgo|asml)\b/i.test(market.question);
+    const hasPriceLevel = /\$\d+/.test(market.question);
+    const hasPriceAction =
+      q.includes('hit (high)') || q.includes('hit (low)') ||
+      q.includes('close above') || q.includes('close below') ||
+      q.includes('hit $') || q.includes('finish week');
+    if (hasTicker && hasPriceLevel && hasPriceAction) {
+      return {
+        ...signal,
+        affected_stocks: validTickers,
+        is_relevant: false,
+        reason: 'Direct stock price-target market — restates equity pricing rather than explaining an independent catalyst.',
+      };
+    }
   }
 
-  // Rule 5: annual product cycle near-certainties have no signal value.
-  if (isAnnualProductCycleMarket(market.question)) {
-    return {
-      ...signal,
-      is_relevant: false,
-      relevance_score: 0.1,
-      urgency: 'low',
-      reason:
-        'Annual product cycle market — foregone conclusion with no independent signal value for portfolio positioning.',
-      affected_stocks: [],
-      affected_sectors: [],
-      signal_type: null,
-      signal_direction: null,
-    };
-  }
-
-  // Rule 6: no stocks and no signal type — transmission path to equities is undefined.
-  const hasStocks = Array.isArray(signal.affected_stocks) && signal.affected_stocks.length > 0;
-  if (!hasStocks && signal.signal_type === null) {
-    return {
-      ...signal,
-      is_relevant: false,
-      reason: 'No affected stocks or signal type identified — transmission path to equities is undefined.',
-    };
-  }
-
-  // Rule 7: thin markets (volume < $10,000) — low confidence regardless of LLM assessment.
-  // Thin markets can be moved by a single participant and produce unreliable probability signals.
-  const volume = market.volume ?? 0;
-  if (volume < 10_000) {
-    return {
-      ...signal,
-      is_relevant: false,
-      confidence: Math.min(clamp(signal.confidence, 0.5), 0.30),
-      urgency: 'low',
-      reason: `Low confidence: volume $${volume.toLocaleString()} is below the $10,000 minimum threshold. Thin markets can be manipulated by a single participant and produce unreliable probability signals.`,
-    };
-  }
-
-  return signal;
-}
-
-/**
- * Deterministic check for the BIT Capital "Ahead of the Curve" thesis:
- *  - the market has moved > 15pp in the last 24h (sharp shift)
- *  - the probability sits in the 25-75% contested range (consensus hasn't formed)
- *  - volume is over $50K (credible, not a thin/manipulable market)
- *
- * If any rule fails, we still honor the LLM's flag (it may catch judgmental
- * cases the rules miss). This is `OR` not `AND` — either path can flag.
- */
-function isAheadOfCurveDeterministic(market: MarketForAnalysis): boolean {
-  const probChange = market.probability_change ?? 0;
-  const probability = market.probability ?? 0.5;
-  const volume = market.volume ?? 0;
-
-  const sharpMove = Math.abs(probChange) > 0.15;
-  const contested = probability >= 0.25 && probability <= 0.75;
-  const credible = volume > 50_000;
-
-  return sharpMove && contested && credible;
-}
-
-function normalizeSignal(
-  signal: RawSignal,
-  marketById: Map<string, MarketForAnalysis>
-): RawSignal | null {
-  const market = marketById.get(signal.market_id);
-  if (!market) return null;
-
-  const gatedSignal = applyQualityGate(signal, market);
-  const probChange = market.probability_change ?? null;
-  const isMoving = probChange !== null && Math.abs(probChange) > MOVEMENT_THRESHOLD;
-
-  // Movement detection: > 20pp change → force urgency to high
-  const movementUrgencyOverride =
-    gatedSignal.is_relevant &&
-    probChange !== null &&
-    Math.abs(probChange) > 0.20;
-
-  // Ahead-of-curve: deterministic OR LLM-flagged. Only set on relevant signals.
-  const aheadOfCurve =
-    gatedSignal.is_relevant &&
-    (isAheadOfCurveDeterministic(market) || Boolean(gatedSignal.is_ahead_of_curve));
-
-  // Filter LLM-supplied buckets to the canonical set so typos/hallucinations
-  // don't leak into the DB. Then merge with deterministic inference from the
-  // affected_stocks list and the signal_type — guarantees coverage even when
-  // the LLM forgets to fill the field.
-  const llmBuckets = Array.isArray(gatedSignal.thematic_buckets)
-    ? gatedSignal.thematic_buckets
-        .map((b) => String(b).trim())
-        .filter((b): b is ThematicBucket => VALID_BUCKETS_SET.has(b))
-    : [];
-  const inferredFromStocks = inferBucketsFromStocks(gatedSignal.affected_stocks);
-  const inferredFromType = inferBucketsFromSignalType(gatedSignal.signal_type);
-  const cleanedBuckets = Array.from(
-    new Set<ThematicBucket>([...llmBuckets, ...inferredFromStocks, ...inferredFromType])
-  );
-
-  return {
-    market_id: gatedSignal.market_id,
-    is_relevant: Boolean(gatedSignal.is_relevant),
-    relevance_score: clamp(gatedSignal.relevance_score, gatedSignal.is_relevant ? 0.65 : 0.2),
-    confidence: clamp(gatedSignal.confidence, 0.5),
-    reason: String(gatedSignal.reason ?? '').slice(0, 500),
-    affected_stocks: Array.isArray(gatedSignal.affected_stocks)
-      ? gatedSignal.affected_stocks.map((stock) => String(stock).trim().toUpperCase()).filter(Boolean)
-      : [],
-    affected_sectors: Array.isArray(gatedSignal.affected_sectors)
-      ? gatedSignal.affected_sectors.map((sector) => String(sector).trim()).filter(Boolean)
-      : [],
-    signal_type: gatedSignal.signal_type ?? null,
-    signal_direction: gatedSignal.signal_direction ?? null,
-    urgency: movementUrgencyOverride ? 'high' : (gatedSignal.urgency ?? 'low'),
-    thesis: String(gatedSignal.thesis ?? '').slice(0, 1200),
-    evidence: Array.isArray(gatedSignal.evidence)
-      ? gatedSignal.evidence.map((item) => String(item).trim()).filter(Boolean).slice(0, 5)
-      : [],
-    key_risks: Array.isArray(gatedSignal.key_risks)
-      ? gatedSignal.key_risks.map((item) => String(item).trim()).filter(Boolean).slice(0, 5)
-      : [],
-    suggested_action: String(gatedSignal.suggested_action ?? '').slice(0, 700),
-    probability_change: probChange,
-    is_moving: isMoving,
-    thematic_buckets: cleanedBuckets,
-    is_ahead_of_curve: aheadOfCurve,
-  };
+  return { ...signal, affected_stocks: validTickers };
 }
 
 function getMissingColumn(message: string) {
-  return message.match(/Could not find the '([^']+)' column/)?.[1] ?? null;
+  return (
+    message.match(/Could not find the '([^']+)' column/)?.[1] ??
+    message.match(/column \w+\.([a-zA-Z0-9_]+) does not exist/)?.[1] ??
+    null
+  );
 }
+
+
 
 function removeColumnFromRows(rows: MutableSignalRow[], column: string) {
   return rows.map((row) => {
@@ -455,6 +324,8 @@ function removeColumnFromRows(rows: MutableSignalRow[], column: string) {
     return nextRow;
   });
 }
+
+
 
 async function saveSignalsWithoutUniqueConstraint(rows: MutableSignalRow[]) {
   const supabase = getSupabaseClient();
@@ -489,6 +360,8 @@ async function saveSignalsWithoutUniqueConstraint(rows: MutableSignalRow[]) {
   }
 }
 
+
+
 async function upsertSignalsWithSchemaFallback(rows: SignalRow[]) {
   const supabase = getSupabaseClient();
   let mutableRows: MutableSignalRow[] = rows.map((row) => ({ ...row }));
@@ -521,6 +394,8 @@ async function upsertSignalsWithSchemaFallback(rows: SignalRow[]) {
     )})`
   );
 }
+
+
 
 async function enrichWithProbabilityChanges(
   markets: MarketForAnalysis[]
@@ -563,7 +438,10 @@ async function enrichWithProbabilityChanges(
   let movingCount = 0;
 
   const enriched = markets.map((market) => {
-    const previous = previousByMarket.get(market.id) ?? null;
+    const storedPrevious = Number(market.probability_24h_ago);
+    const previous =
+      previousByMarket.get(market.id) ??
+      (Number.isFinite(storedPrevious) ? storedPrevious : null);
     const current = market.probability != null ? Number(market.probability) : null;
     const change =
       previous !== null && current !== null
@@ -597,49 +475,21 @@ async function enrichWithProbabilityChanges(
   return enriched;
 }
 
-async function fetchUnanalyzedMarkets(limit: number) {
-  const supabase = getSupabaseClient();
-  const config = await getAnalystConfig();
 
-  const { data: markets, error: marketFetchError } = await supabase
-    .from('markets')
-    .select('id, question, description, probability, volume, liquidity, category, end_date')
-    .eq('is_active', true)
-    .order('volume', { ascending: false })
-    .limit(Math.max(limit * 25, 500));
 
-  if (marketFetchError) throw new Error(`Supabase market fetch error: ${marketFetchError.message}`);
-  if (!markets?.length) return [];
-
-  const ids = markets.map((market) => market.id);
-  const { data: existingSignals, error: signalFetchError } = await supabase
-    .from('signals')
-    .select('market_id')
-    .in('market_id', ids);
-
-  if (signalFetchError) throw new Error(`Supabase signal fetch error: ${signalFetchError.message}`);
-
-  const analyzedIds = new Set((existingSignals ?? []).map((signal) => signal.market_id));
-  const unanalyzedMarkets = (markets as MarketForAnalysis[]).filter(
-    (market) => !analyzedIds.has(market.id)
-  );
-  const analyticallyUsefulMarkets = unanalyzedMarkets.filter(isAnalyticallyUseful);
-  const rejectedCount = unanalyzedMarkets.length - analyticallyUsefulMarkets.length;
-  if (rejectedCount > 0) {
-    console.log(
-      `[Filter] Pre-filter rejected ${rejectedCount}/${unanalyzedMarkets.length} unanalyzed markets before LLM analysis`
-    );
+function hasRecentProbabilityMove(market: MarketForAnalysis): boolean {
+  const snapshotChange = Number(market.probability_change);
+  if (Number.isFinite(snapshotChange)) {
+    return Math.abs(snapshotChange) >= MOVEMENT_THRESHOLD;
   }
 
-  return sortMarketsForAnalysis(analyticallyUsefulMarkets, config)
-    .slice(0, limit)
-    .map(({ market, priority }) => ({
-      ...market,
-      candidate_score: priority.score,
-      candidate_reasons: priority.reasons,
-      candidate_noise: priority.noise,
-    }));
+  const current = Number(market.probability);
+  const previous = Number(market.probability_24h_ago);
+  if (!Number.isFinite(current) || !Number.isFinite(previous)) return false;
+  return Math.abs(current - previous) >= MOVEMENT_THRESHOLD;
 }
+
+
 
 async function refreshExistingSignalMovement(limit: number) {
   const supabase = getSupabaseClient();
@@ -660,11 +510,26 @@ async function refreshExistingSignalMovement(limit: number) {
     return { updated: 0, moving: 0 };
   }
 
-  const { data: markets, error: marketFetchError } = await supabase
+  const freshMarketColumns =
+    'id, question, description, probability, probability_24h_ago, volume, liquidity, category, end_date, last_updated_at';
+  const fallbackMarketColumns =
+    'id, question, description, probability, volume, liquidity, category, end_date';
+
+  let { data: markets, error: marketFetchError } = await supabase
     .from('markets')
-    .select('id, question, description, probability, volume, liquidity, category, end_date')
+    .select(freshMarketColumns)
     .in('id', Array.from(existingIds))
     .eq('is_active', true);
+
+  if (marketFetchError && getMissingColumn(marketFetchError.message)) {
+    const fallback = await supabase
+      .from('markets')
+      .select(fallbackMarketColumns)
+      .in('id', Array.from(existingIds))
+      .eq('is_active', true);
+    markets = fallback.data as typeof markets;
+    marketFetchError = fallback.error;
+  }
 
   if (marketFetchError) {
     console.warn('[Movement] Existing signal market fetch warning:', marketFetchError.message);
@@ -724,191 +589,151 @@ export async function getAnalysisCandidates(limit = 20) {
   return fetchUnanalyzedMarkets(limit);
 }
 
-async function analyzeBatch(markets: MarketForAnalysis[], sensitivity: Sensitivity = 'balanced') {
+
+
+async function fetchUnanalyzedMarkets(limit: number) {
+  const supabase = getSupabaseClient();
   const config = await getAnalystConfig();
-  const enriched = await enrichWithProbabilityChanges(markets);
-  const marketById = new Map(enriched.map((market) => [market.id, market]));
-  const marketPayload = enriched.map((market) => ({
-    market_id: market.id,
-    question: market.question,
-    description: market.description,
-    yes_probability: market.probability,
-    volume: market.volume,
-    liquidity: market.liquidity,
-    category: market.category,
-    end_date: market.end_date,
-    probability_change_24h_pct:
-      market.probability_change != null
-        ? Number((market.probability_change * 100).toFixed(1))
-        : null,
-    is_moving: Boolean(market.is_moving),
-    deterministic_candidate_score: market.candidate_score,
-    deterministic_candidate_reasons: market.candidate_reasons,
-    deterministic_noise_flags: market.candidate_noise,
-  }));
 
-  const systemPrompt = `You are a senior investment analyst at BIT Capital GmbH, a Berlin-based asset manager with $2.7B AUM as of 2025. You are building a Polymarket signal scanner to surface early-warning signals for the portfolio before consensus forms.
+  const freshMarketColumns =
+    'id, question, description, probability, probability_24h_ago, volume, liquidity, category, end_date, last_updated_at';
+  const fallbackMarketColumns =
+    'id, question, description, probability, volume, liquidity, category, end_date';
 
-${BITCAP_RESEARCH_CONTEXT}
+  let { data: markets, error: marketFetchError } = await supabase
+    .from('markets')
+    .select(freshMarketColumns)
+    .eq('is_active', true)
+    .order('volume', { ascending: false })
+    .limit(Math.max(limit * 25, 500));
 
-Your job is judgment, not keyword matching. A market can be relevant even when it does not name a company if the event has a clear transmission path to public equities.
-
-RELEVANCE FRAMEWORK — a market is relevant ONLY when ALL THREE criteria are satisfied:
-
-1. SPECIFIC CATALYST: A discrete event, regulation, ruling, filing, launch, or decision is driving the probability. Generic price drift or market momentum alone does not qualify.
-
-2. INFORMATIONAL EDGE: The outcome is not already obvious from public information. Markets at >85% or <15% probability have reached consensus — the signal is already priced in. Reject these.
-
-3. ACTIONABILITY: An analyst could plausibly take a position, hedge, or reweight a portfolio holding based on this signal. Ask yourself: "What would I tell the portfolio manager to DO?" If the answer is unclear, set is_relevant: false.
-
-ALWAYS HIGH PRIORITY — these market types almost always satisfy all three criteria. Give them extra scrutiny before rejecting:
-- Any market that directly mentions a BIT Capital holding by ticker or name: IREN, MSFT, GOOGL, META, NVDA, SOFI, RDDT, HIMS, LMND, HNGE, CRCL, APLD, COHR, GLXY, NTSK
-- Fed rate decisions, FOMC outcomes, or any central bank policy shift that reprices growth equities.
-- AI regulation in the US or EU — any bill, executive order, or consent decree affecting LLMs, foundation models, or AI deployment.
-- Crypto regulation — ETF approvals/rejections, exchange licensing, stablecoin legislation, SEC/CFTC actions.
-- Semiconductor export controls or tariffs, especially US–China or Taiwan-related restrictions on chips, equipment, or advanced packaging.
-- Major tech company earnings results — beating or missing estimates by a meaningful margin.
-- IPOs of significant tech companies (>$1B expected market cap) that could affect sector dynamics or compete with holdings.
-- Taiwan Strait / China geopolitical events with a plausible impact on semiconductor supply chains.
-
-REJECT — mark is_relevant: false for these:
-- Pure BTC/ETH price-target markets ("Will Bitcoin close above $100K?" / "Will Ethereum end 2025 above $5,000?") — no discrete catalyst. Crypto REGULATION markets (ETF approvals, SEC actions, stablecoin legislation) remain relevant.
-- Markets with probability above 85% or below 15% — consensus has already formed and the outcome is priced into public markets.
-- Markets expiring within 24 hours — no actionable window for portfolio adjustment.
-- Annual product cycle certainties: "Will Apple release an iPhone in 2025?" — foregone conclusions with no timing uncertainty or signal value.
-- 5-minute, hourly, or daily crypto/equity price windows — too short-term to be strategic signals.
-- Sports markets, even if a tech company is a sponsor.
-- Celebrity or entertainment markets with no equity transmission path: award shows, reality TV, celebrity tweets.
-- Non-tech political markets with no plausible tech equity transmission path: crime rates, local elections, immigration.
-- Oil, agriculture, and real estate markets unless directly tied to data center energy costs or semiconductor materials.
-
-Important: direct markets about a stock crossing a price level restate equity pricing rather than explaining a catalyst. Mark them not relevant unless the question contains a fundamental driver (regulation, earnings surprise, M&A).
-
-The deterministic_candidate_score is a triage hint. You may disagree with it, but explain why in the reason/thesis.
-
-PORTFOLIO WEIGHTING — use this to determine urgency:
-
-TIER 1 — LARGE POSITIONS (>$100M): IREN, MSFT, GOOGL, META, NVDA — signals affecting these are ALWAYS high urgency.
-TIER 2 — MEDIUM POSITIONS ($30-100M): RDDT, HIMS, LMND, HNGE, SOFI, AMD, AMZN, AAPL — signals affecting these default to medium urgency unless the event is highly impactful (then high).
-TIER 3 — SMALLER POSITIONS (<$30M): CRCL, APLD, COHR, GLXY, NTSK — signals affecting these default to low or medium urgency.
-
-A signal about IREN (Tier 1) should be MORE URGENT than a signal about NTSK (Tier 3), even if the event significance is similar. Position size is a multiplier on urgency. Pure-macro signals (Fed, tariffs, AI regulation) are high urgency by default because they affect the whole book.
-
-THEMATIC EXPOSURE TAGGING — REQUIRED on every relevant signal, never empty:
-
-For each relevant signal, tag which BIT Capital thematic buckets it affects. Pick ALL that apply from this EXACT list (case-sensitive, must match strings exactly):
-- "AI Infrastructure"  → IREN, NVDA, AMD, APLD, COHR (chips, GPUs, data-center compute, mining infra)
-- "Big Tech Platforms" → MSFT, GOOGL, META, AAPL, AMZN, RDDT
-- "Fintech"            → SOFI, LMND, HIMS, CRCL
-- "Digital Assets"     → IREN, CRCL, GLXY, BTC/ETH price markets, crypto ETFs
-- "Digital Health"     → HNGE, HIMS, LMND
-- "Cybersecurity"      → NTSK
-- "Macro/Rates"        → Fed decisions, FOMC, tariffs, inflation prints, AI regulation, semiconductor export controls — anything that touches the whole book
-
-Rules:
-- A SINGLE signal frequently affects MULTIPLE buckets. A Fed rate decision is "Macro/Rates" AND should also include the equity buckets it most affects (typically "Big Tech Platforms" and "AI Infrastructure" for growth/duration-sensitive holdings).
-- AI export controls hit "AI Infrastructure" AND "Macro/Rates".
-- A SpaceX IPO question affects "Big Tech Platforms".
-- A Bitcoin price market is "Digital Assets" (and "Macro/Rates" if it's a 2025+ macro-driven move).
-- NEVER return an empty thematic_buckets array on a relevant signal. If nothing else fits, include "Macro/Rates" as a default — the portfolio is rate-sensitive across the board.
-
-AHEAD OF THE CURVE — set is_ahead_of_curve: true when:
-
-Mark is_ahead_of_curve = true for signals where the probability is in a contested range (25-75%) and the market hasn't reached consensus yet. These are the most valuable for BIT Capital because their thesis is to act BEFORE the market settles. A market at 95% has already settled — even if relevant, it's not "ahead of curve" because consensus has already formed. Conversely, a market at 50% with sharp recent movement is exactly the regime where BIT wants to position. (We'll also flag this deterministically when a market has moved >15pp on >$50K volume in the contested range, but you should also flag judgmental cases — emerging narratives, contested regulatory outcomes, where the market is still figuring out what to price.)
-
-Return JSON only with this shape:
-{
-  "signals": [
-    {
-      "market_id": "exact input id",
-      "is_relevant": true,
-      "relevance_score": 0.0,
-      "confidence": 0.0,
-      "reason": "one sentence",
-      "affected_stocks": ["NVDA"],
-      "affected_sectors": ["Semiconductors"],
-      "signal_type": "macro|rates|tariff|regulatory|company|sector|crypto|null",
-      "signal_direction": "positive|negative|mixed|unclear|null",
-      "urgency": "high|medium|low",
-      "thematic_buckets": ["AI Infrastructure", "Macro/Rates"],
-      "is_ahead_of_curve": false,
-      "thesis": "specific equity impact thesis",
-      "evidence": ["why the market probability matters"],
-      "key_risks": ["why this could be noise"],
-      "suggested_action": "what an analyst should check next"
-    }
-  ]
-}`;
-
-  const fullSystemPrompt = systemPrompt + SENSITIVITY_PROMPTS[sensitivity];
-
-  // Safety check: verify the prompt was loaded with the updated content
-  if (!fullSystemPrompt.includes('IREN')) {
-    throw new Error('[Filter] System prompt not updated correctly — IREN not found in prompt');
+  if (marketFetchError && getMissingColumn(marketFetchError.message)) {
+    console.warn(
+      '[Filter] markets freshness columns missing; falling back to legacy market selection'
+    );
+    const fallback = await supabase
+      .from('markets')
+      .select(fallbackMarketColumns)
+      .eq('is_active', true)
+      .order('volume', { ascending: false })
+      .limit(Math.max(limit * 25, 500));
+    markets = fallback.data as typeof markets;
+    marketFetchError = fallback.error;
   }
-  console.log('[Filter] System prompt loaded OK | sensitivity:', sensitivity, '| length:', fullSystemPrompt.length);
-  console.log('[Filter] Batch size:', markets.length, '| Sample market:', markets[0]?.question);
 
-  const response = await callOpenAIJson<OpenAISignalResponse>([
-    {
-      role: 'system',
-      content: fullSystemPrompt,
-    },
-    {
-      role: 'user',
-      content: `Analyst configuration:
-Sectors: ${config.sectors.join(', ')}
-Stocks: ${config.stocks.join(', ')}
-Focus notes: ${config.focus_notes}
+  if (marketFetchError) throw new Error(`Supabase market fetch error: ${marketFetchError.message}`);
+  if (!markets?.length) return [];
 
-Analyze these active Polymarket markets:
-${JSON.stringify(marketPayload, null, 2)}
+  const marketsWithMovement = await enrichWithProbabilityChanges(markets as MarketForAnalysis[]);
+  const ids = marketsWithMovement.map((market) => market.id);
+  const { data: existingSignals, error: signalFetchError } = await supabase
+    .from('signals')
+    .select('market_id')
+    .in('market_id', ids);
 
-Return exactly one signal object for each market. Use relevance_score >= 0.65 only when the market deserves analyst attention.`,
-    },
-  ]);
+  if (signalFetchError) throw new Error(`Supabase signal fetch error: ${signalFetchError.message}`);
 
-  const relevantCount = response.signals?.filter((s) => s.is_relevant).length ?? 0;
-  console.log('[Filter] LLM returned:', response.signals?.length ?? 0, 'signals,', relevantCount, 'relevant | Sample:', JSON.stringify(response.signals?.[0]).slice(0, 150));
+  const analyzedIds = new Set((existingSignals ?? []).map((signal) => signal.market_id));
+  const analysisCandidateMarkets = marketsWithMovement.filter(
+    (market) => !analyzedIds.has(market.id) || hasRecentProbabilityMove(market)
+  );
+  const changedCount = analysisCandidateMarkets.filter(
+    (market) => analyzedIds.has(market.id) && hasRecentProbabilityMove(market)
+  ).length;
+    if (changedCount > 0) {
+    console.log(`[Filter] Re-analyzing ${changedCount} markets with fresh probability moves`);
+  }
 
-  return response.signals
-    .map((signal) => normalizeSignal(signal, marketById))
-    .filter((signal): signal is RawSignal => signal !== null);
+  return sortMarketsForAnalysis(analysisCandidateMarkets, config)
+    .slice(0, limit)
+    .map(({ market, priority }) => ({
+      ...market,
+      candidate_score: priority.score,
+      candidate_reasons: priority.reasons,
+      candidate_noise: priority.noise,
+    }));
 }
 
-export async function analyzeMarkets(limit = 36, sensitivity: Sensitivity = 'balanced'): Promise<AnalyzeResult> {
-  console.log('[Filter] analyzeMarkets starting, model:', getOpenAIModel(), '| limit:', limit, '| sensitivity:', sensitivity);
-  const refreshed = await refreshExistingSignalMovement(limit);
-  console.log('[Movement] Existing signal refresh complete:', refreshed);
-  const markets = await getAnalysisCandidates(limit);
-  console.log('[Filter] Candidates to analyze:', markets.length, '| Sample:', markets[0]?.question ?? 'none');
-  if (!markets.length) {
-    console.log('[Filter] No unanalyzed markets found — all markets may already have signal rows. Run ingest first or clear old signals.');
+
+
+async function analyzeBatch(markets: MarketForAnalysis[]): Promise<SignalRow[]> {
+  if (markets.length === 0) return [];
+  
+  const enriched = await enrichWithProbabilityChanges(markets);
+  const userPrompt = JSON.stringify(
+    enriched.map((m) => ({
+      id: m.id,
+      question: m.question,
+      description: m.description,
+      probability: m.probability,
+    }))
+  );
+
+  console.log(`[Filter] Sending batch of ${markets.length} to gpt-4o-mini...`);
+  
+  const response = await callOpenAIJson<OpenAISignalResponse>([
+    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'user', content: userPrompt }
+  ]);
+
+  const parsedSignals = response.signals || [];
+  const analyzedAt = new Date().toISOString();
+  const rows: SignalRow[] = [];
+
+  for (let i = 0; i < parsedSignals.length; i++) {
+    const market = enriched[i];
+    if (!market) continue;
+    
+    // Inject market ID because the LLM might not return it reliably, but relies on order
+    let parsed = { ...parsedSignals[i], market_id: market.id };
+
+    // Apply hard validation gates AFTER the LLM — these are code-level overrides
+    // that the LLM cannot bypass, even if it marks the signal relevant.
+    parsed = enforceValidation(parsed, market);
+
+    rows.push({
+      ...parsed,
+      model: 'gpt-4o-mini',
+      analyzed_at: analyzedAt,
+      probability_change: market.probability_change,
+      is_moving: market.is_moving,
+    });
+  }
+
+  return rows;
+}
+
+export async function analyzeMarkets(limit = 36): Promise<AnalyzeResult> {
+  console.log(`[Filter] analyzeMarkets starting | limit: ${limit}`);
+  
+  // Refresh old signal movement before fetching new ones
+  await refreshExistingSignalMovement(limit);
+  
+  const unanalyzed = await fetchUnanalyzedMarkets(limit);
+  if (!unanalyzed.length) {
+    console.log('[Filter] No new markets need analysis.');
     return { analyzed: 0, relevant: 0 };
   }
 
-  let totalAnalyzed = 0;
-  let totalRelevant = 0;
+  let analyzedCount = 0;
+  let relevantCount = 0;
+  const allRows: SignalRow[] = [];
 
-  for (let index = 0; index < markets.length; index += BATCH_SIZE) {
-    const batch = markets.slice(index, index + BATCH_SIZE);
-    const signals = await analyzeBatch(batch, sensitivity);
-    const rows = signals.map((signal) => ({
-      ...signal,
-      // Explicit non-null guarantees for the BIT-Capital-specific columns —
-      // protects against the case where normalizeSignal returns undefined
-      // (the schema fallback would otherwise silently strip these).
-      thematic_buckets: signal.thematic_buckets ?? [],
-      is_ahead_of_curve: signal.is_ahead_of_curve ?? false,
-      model: getOpenAIModel(),
-      analyzed_at: new Date().toISOString(),
-    }));
-
-    await upsertSignalsWithSchemaFallback(rows);
-
-    totalAnalyzed += signals.length;
-    totalRelevant += signals.filter((signal) => signal.is_relevant).length;
+  for (let i = 0; i < unanalyzed.length; i += BATCH_SIZE) {
+    const batch = unanalyzed.slice(i, i + BATCH_SIZE);
+    try {
+      const rows = await analyzeBatch(batch);
+      allRows.push(...rows);
+      analyzedCount += rows.length;
+      relevantCount += rows.filter((r) => r.is_relevant).length;
+    } catch (err) {
+      console.error(`[Filter] analyzeBatch failed:`, err);
+    }
   }
 
-  return { analyzed: totalAnalyzed, relevant: totalRelevant };
+  if (allRows.length > 0) {
+    await upsertSignalsWithSchemaFallback(allRows);
+  }
+
+  return { analyzed: analyzedCount, relevant: relevantCount };
 }
