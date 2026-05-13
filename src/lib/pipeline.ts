@@ -1,20 +1,7 @@
-import { analyzeMarkets, type Sensitivity } from './filter';
+import { analyzeMarkets } from './filter';
 import { fetchAndStoreMarkets } from './polymarket';
 import { generateSignalReport } from './reports';
 import { getSupabaseClient } from './supabase';
-
-const VALID_SENSITIVITIES: Sensitivity[] = ['strict', 'balanced', 'broad'];
-
-async function readSensitivity(): Promise<Sensitivity> {
-  const supabase = getSupabaseClient();
-  const { data } = await supabase
-    .from('config')
-    .select('value')
-    .eq('key', 'filter_sensitivity')
-    .single();
-  const v = data?.value;
-  return VALID_SENSITIVITIES.includes(v as Sensitivity) ? (v as Sensitivity) : 'balanced';
-}
 
 export interface PipelineResult {
   run_id: string | null;
@@ -45,9 +32,8 @@ export async function runPipeline(): Promise<PipelineResult> {
 
   try {
     const marketsIngested = await fetchAndStoreMarkets();
-    const sensitivity = await readSensitivity();
-    const analysis = await analyzeMarkets(36, sensitivity);
-    const report = analysis.relevant > 0 ? await generateSignalReport() : null;
+    const analysis = await analyzeMarkets(100);
+    const report = await generateSignalReport();
 
     if (run?.id) {
       await supabase

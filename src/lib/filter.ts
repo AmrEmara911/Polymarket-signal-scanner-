@@ -600,10 +600,15 @@ async function fetchUnanalyzedMarkets(limit: number) {
   const fallbackMarketColumns =
     'id, question, description, probability, volume, liquidity, category, end_date';
 
+  // PRE-FILTER at the SQL layer: only fetch markets in the 15–85% informational
+  // edge window. Markets at extremes are guaranteed to fail HARD RULE 4 in
+  // enforceValidation, so spending an LLM call on them is pure waste.
   let { data: markets, error: marketFetchError } = await supabase
     .from('markets')
     .select(freshMarketColumns)
     .eq('is_active', true)
+    .gte('probability', 0.15)
+    .lte('probability', 0.85)
     .order('volume', { ascending: false })
     .limit(Math.max(limit * 25, 500));
 
@@ -615,6 +620,8 @@ async function fetchUnanalyzedMarkets(limit: number) {
       .from('markets')
       .select(fallbackMarketColumns)
       .eq('is_active', true)
+      .gte('probability', 0.15)
+      .lte('probability', 0.85)
       .order('volume', { ascending: false })
       .limit(Math.max(limit * 25, 500));
     markets = fallback.data as typeof markets;
