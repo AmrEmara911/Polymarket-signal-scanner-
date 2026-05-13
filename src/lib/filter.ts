@@ -122,29 +122,52 @@ const SYSTEM_PROMPT = `You are a senior research analyst at BIT Capital, a Berli
 asset manager focused on global technology equities. Your job is
 to filter Polymarket prediction markets for genuine investment
 signals.
+
 BIT CAPITAL HOLDINGS (the only tickers you may use):
 NVDA, MSFT, GOOGL, GOOG, META, AAPL, AMZN, AMD, ASML, TSM,
 ORCL, ADBE, CRM, NOW, PLTR, ARM, AVGO, QCOM, INTC, MU, NFLX,
 SHOP, COIN
+
 A MARKET IS RELEVANT ONLY IF ALL THREE ARE TRUE:
 
-You can name at least ONE specific ticker from the holdings
-list above in "affected_stocks". If you cannot name one, the
-market is NOT relevant.
-The market has a specific catalyst (regulation, earnings,
-launch, ruling, decision) — not a generic price movement.
-The market is not already fully priced in (reject probability
-above 0.85 or below 0.15).
+1. You can name at least ONE specific ticker from the holdings
+   list above in "affected_stocks". If you cannot name one,
+   the market is NOT relevant.
+
+   For MACRO events that affect tech multiples broadly (Fed rate
+   decisions, CPI prints, jobs reports, tariff announcements,
+   AI regulation, export controls, antitrust rulings), assign
+   the most exposed BIT Capital holdings: typically MSFT, GOOGL,
+   META, NVDA, AAPL. Do NOT leave affected_stocks empty just
+   because the catalyst is macro rather than company-specific.
+
+2. The market has a SPECIFIC CATALYST. Any of these qualify:
+   - Company event: earnings, product launch, M&A, IPO
+   - Regulatory: ruling, antitrust action, approval, policy change
+   - Macro: Fed decision, CPI/inflation, jobs report, GDP
+   - Geopolitical: tariff, export control, sanctions, trade deal
+   - Supply chain: fab opening/delay, capacity announcement
+   Generic price movements ("will NVDA close above $X?") do NOT
+   qualify — those are not catalysts, they are price targets.
+
+3. The market is not already fully priced in (reject probability
+   above 0.85 or below 0.15).
 
 REJECT THESE CATEGORIES ENTIRELY:
+- Pure crypto price targets ("Will BTC reach $X?", "Will ETH hit Y?")
+- Direct equity price-target markets ("Will NVDA hit $250 by Q3?")
+- Markets about private companies with no BIT Capital exposure
+  (SpaceX, Anthropic, xAI as standalones — note: OpenAI IS
+  relevant via MSFT exposure)
+- Sports, entertainment, weather, celebrity markets
+- Pure geopolitical hypotheticals with no clear equity read-through
+- Markets resolving in less than 24 hours
 
-Pure crypto price targets (e.g. "Will BTC reach $X?")
-Markets about private companies with no BIT Capital exposure
-(SpaceX, Anthropic, OpenAI as standalones — note: OpenAI IS
-relevant via MSFT exposure)
-Sports, entertainment, weather, celebrity markets
-Pure geopolitical hypotheticals with no clear equity read-through
-Markets resolving in less than 12 hours
+CONFIDENCE CALIBRATION:
+- 0.80+: Strong direct read-through to a named holding's near-term P&L
+- 0.65-0.79: Clear thematic exposure with identified ticker(s)
+- 0.50-0.64: Plausible read-through but uncertainty in magnitude or timing
+- Below 0.50: Don't mark relevant — the case is too weak
 
 FEW-SHOT EXAMPLES:
 Market: "Will the Fed cut rates by June 2026?"
@@ -230,18 +253,64 @@ universe. Not a tech sector signal.",
 Return a JSON object with a "signals" array containing one
 analyzed signal per input market, in the same order.`;
 
+// Per-pipeline-run counters for diagnostic logging
+const rejectionStats = {
+  llm_rejected: 0,
+  no_stocks: 0,
+  low_confidence: 0,
+  no_valid_ticker: 0,
+  probability_extreme: 0,
+  expires_soon: 0,
+  price_target: 0,
+  passed: 0,
+};
+
+function resetRejectionStats() {
+  rejectionStats.llm_rejected = 0;
+  rejectionStats.no_stocks = 0;
+  rejectionStats.low_confidence = 0;
+  rejectionStats.no_valid_ticker = 0;
+  rejectionStats.probability_extreme = 0;
+  rejectionStats.expires_soon = 0;
+  rejectionStats.price_target = 0;
+  rejectionStats.passed = 0;
+}
+
+function logRejectionStats() {
+  console.log(`[Filter] === Rejection breakdown ===`);
+  console.log(`[Filter]   LLM said not relevant:     ${rejectionStats.llm_rejected}`);
+  console.log(`[Filter]   No affected_stocks:        ${rejectionStats.no_stocks}`);
+  console.log(`[Filter]   Confidence < 0.50:         ${rejectionStats.low_confidence}`);
+  console.log(`[Filter]   No valid ticker:           ${rejectionStats.no_valid_ticker}`);
+  console.log(`[Filter]   Probability outside 15-85: ${rejectionStats.probability_extreme}`);
+  console.log(`[Filter]   Expires within 24h:        ${rejectionStats.expires_soon}`);
+  console.log(`[Filter]   Direct price-target:       ${rejectionStats.price_target}`);
+  console.log(`[Filter]   PASSED:                    ${rejectionStats.passed}`);
+}
+
 function enforceValidation(signal: ParsedSignal, market: MarketForAnalysis): ParsedSignal {
+  // If LLM already said not relevant, count it and return as-is.
+  if (!signal.is_relevant) {
+    rejectionStats.llm_rejected += 1;
+    return signal;
+  }
+
   // HARD RULE 1: No affected_stocks = NOT relevant
-  if (signal.is_relevant &&
-      (!signal.affected_stocks ||
-       signal.affected_stocks.length === 0 ||
-       signal.affected_stocks.includes('None') ||
-       signal.affected_stocks.includes('NONE'))) {
+  if (!signal.affected_stocks ||
+      signal.affected_stocks.length === 0 ||
+      signal.affected_stocks.includes('None') ||
+      signal.affected_stocks.includes('NONE')) {
+    rejectionStats.no_stocks += 1;
+    console.log(`[Filter] REJECT no_stocks: "${market.question.substring(0, 80)}" | LLM said relevant but named no tickers`);
     return { ...signal, is_relevant: false };
   }
 
-  // HARD RULE 2: Confidence below 0.55 = NOT relevant
-  if (signal.is_relevant && signal.confidence < 0.55) {
+  // HARD RULE 2: Confidence below 0.50 = NOT relevant.
+  // Lowered from 0.55 because gpt-4o-mini anchors at 0.5 for marginal cases
+  // and was killing legitimate macro signals at 0.50-0.54.
+  if (signal.confidence < 0.50) {
+    rejectionStats.low_confidence += 1;
+    console.log(`[Filter] REJECT low_confidence (${signal.confidence}): "${market.question.substring(0, 80)}"`);
     return { ...signal, is_relevant: false };
   }
 
@@ -252,29 +321,31 @@ function enforceValidation(signal: ParsedSignal, market: MarketForAnalysis): Par
     'AVGO','QCOM','INTC','MU','NFLX','SHOP','COIN',
   ];
   const validTickers = (signal.affected_stocks || []).filter(t => HOLDINGS.includes(t));
-  if (signal.is_relevant && validTickers.length === 0) {
+  if (validTickers.length === 0) {
+    rejectionStats.no_valid_ticker += 1;
+    console.log(`[Filter] REJECT no_valid_ticker: "${market.question.substring(0, 80)}" | LLM named ${JSON.stringify(signal.affected_stocks)} — none in holdings list`);
     return { ...signal, is_relevant: false };
   }
 
   // HARD RULE 4: Probability outside 15–85% informational edge window.
-  // The LLM is instructed to reject these but sometimes ignores it.
-  // This code-level gate is the definitive enforcement.
-  if (signal.is_relevant) {
-    const prob = market.probability ?? 0.5;
-    if (prob > 0.85 || prob < 0.15) {
-      return {
-        ...signal,
-        affected_stocks: validTickers,
-        is_relevant: false,
-        reason: `Probability ${(prob * 100).toFixed(0)}% is outside the 15–85% informational edge window — outcome has reached consensus and is already priced into public markets.`,
-      };
-    }
+  const prob = market.probability ?? 0.5;
+  if (prob > 0.85 || prob < 0.15) {
+    rejectionStats.probability_extreme += 1;
+    console.log(`[Filter] REJECT probability_extreme (${(prob * 100).toFixed(0)}%): "${market.question.substring(0, 80)}"`);
+    return {
+      ...signal,
+      affected_stocks: validTickers,
+      is_relevant: false,
+      reason: `Probability ${(prob * 100).toFixed(0)}% is outside the 15–85% informational edge window — outcome has reached consensus and is already priced into public markets.`,
+    };
   }
 
   // HARD RULE 5: Markets expiring within 24 hours — no actionable window.
-  if (signal.is_relevant && market.end_date) {
+  if (market.end_date) {
     const hoursRemaining = (new Date(market.end_date).getTime() - Date.now()) / (1000 * 60 * 60);
     if (hoursRemaining < 24) {
+      rejectionStats.expires_soon += 1;
+      console.log(`[Filter] REJECT expires_soon (${hoursRemaining.toFixed(1)}h): "${market.question.substring(0, 80)}"`);
       return {
         ...signal,
         affected_stocks: validTickers,
@@ -285,25 +356,26 @@ function enforceValidation(signal: ParsedSignal, market: MarketForAnalysis): Par
   }
 
   // HARD RULE 6: Direct equity price-target ("Will NVDA hit (HIGH) $224?").
-  // These restate equity pricing rather than explaining a catalyst.
-  if (signal.is_relevant) {
-    const q = market.question.toLowerCase();
-    const hasTicker = /\([a-z]{1,5}\)|\b(aapl|amzn|googl|goog|meta|msft|nvda|amd|avgo|asml)\b/i.test(market.question);
-    const hasPriceLevel = /\$\d+/.test(market.question);
-    const hasPriceAction =
-      q.includes('hit (high)') || q.includes('hit (low)') ||
-      q.includes('close above') || q.includes('close below') ||
-      q.includes('hit $') || q.includes('finish week');
-    if (hasTicker && hasPriceLevel && hasPriceAction) {
-      return {
-        ...signal,
-        affected_stocks: validTickers,
-        is_relevant: false,
-        reason: 'Direct stock price-target market — restates equity pricing rather than explaining an independent catalyst.',
-      };
-    }
+  const q = market.question.toLowerCase();
+  const hasTicker = /\([a-z]{1,5}\)|\b(aapl|amzn|googl|goog|meta|msft|nvda|amd|avgo|asml)\b/i.test(market.question);
+  const hasPriceLevel = /\$\d+/.test(market.question);
+  const hasPriceAction =
+    q.includes('hit (high)') || q.includes('hit (low)') ||
+    q.includes('close above') || q.includes('close below') ||
+    q.includes('hit $') || q.includes('finish week');
+  if (hasTicker && hasPriceLevel && hasPriceAction) {
+    rejectionStats.price_target += 1;
+    console.log(`[Filter] REJECT price_target: "${market.question.substring(0, 80)}"`);
+    return {
+      ...signal,
+      affected_stocks: validTickers,
+      is_relevant: false,
+      reason: 'Direct stock price-target market — restates equity pricing rather than explaining an independent catalyst.',
+    };
   }
 
+  rejectionStats.passed += 1;
+  console.log(`[Filter] PASS: "${market.question.substring(0, 80)}" | ${validTickers.join(',')} | conf=${signal.confidence}`);
   return { ...signal, affected_stocks: validTickers };
 }
 
@@ -712,10 +784,11 @@ async function analyzeBatch(markets: MarketForAnalysis[]): Promise<SignalRow[]> 
 
 export async function analyzeMarkets(limit = 36): Promise<AnalyzeResult> {
   console.log(`[Filter] analyzeMarkets starting | limit: ${limit}`);
-  
+  resetRejectionStats();
+
   // Refresh old signal movement before fetching new ones
   await refreshExistingSignalMovement(limit);
-  
+
   const unanalyzed = await fetchUnanalyzedMarkets(limit);
   if (!unanalyzed.length) {
     console.log('[Filter] No new markets need analysis.');
@@ -751,6 +824,8 @@ export async function analyzeMarkets(limit = 36): Promise<AnalyzeResult> {
   if (allRows.length > 0) {
     await upsertSignalsWithSchemaFallback(allRows);
   }
+
+  logRejectionStats();
 
   return { analyzed: analyzedCount, relevant: relevantCount };
 }
