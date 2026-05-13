@@ -722,19 +722,29 @@ export async function analyzeMarkets(limit = 36): Promise<AnalyzeResult> {
     return { analyzed: 0, relevant: 0 };
   }
 
+  // Run batches in PARALLEL. With 100 markets and BATCH_SIZE=10 we fire 10
+  // OpenAI calls at once instead of sequentially. gpt-4o-mini's rate limit
+  // (200 req/min, 200k tok/min) easily accommodates this, and total wall
+  // time drops from ~2-3 minutes to ~15 seconds.
+  const batches: MarketForAnalysis[][] = [];
+  for (let i = 0; i < unanalyzed.length; i += BATCH_SIZE) {
+    batches.push(unanalyzed.slice(i, i + BATCH_SIZE));
+  }
+
+  console.log(`[Filter] Dispatching ${batches.length} batches in parallel...`);
+  const batchResults = await Promise.allSettled(batches.map((batch) => analyzeBatch(batch)));
+
   let analyzedCount = 0;
   let relevantCount = 0;
   const allRows: SignalRow[] = [];
 
-  for (let i = 0; i < unanalyzed.length; i += BATCH_SIZE) {
-    const batch = unanalyzed.slice(i, i + BATCH_SIZE);
-    try {
-      const rows = await analyzeBatch(batch);
-      allRows.push(...rows);
-      analyzedCount += rows.length;
-      relevantCount += rows.filter((r) => r.is_relevant).length;
-    } catch (err) {
-      console.error(`[Filter] analyzeBatch failed:`, err);
+  for (const result of batchResults) {
+    if (result.status === 'fulfilled') {
+      allRows.push(...result.value);
+      analyzedCount += result.value.length;
+      relevantCount += result.value.filter((r) => r.is_relevant).length;
+    } else {
+      console.error(`[Filter] analyzeBatch failed:`, result.reason);
     }
   }
 
