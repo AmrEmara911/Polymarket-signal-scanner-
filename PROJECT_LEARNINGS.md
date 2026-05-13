@@ -123,6 +123,24 @@ The pipeline initially re-ingested only new markets on each "Run Pipeline Now" c
 
 I patched this mid-build to re-ingest fresh probabilities for *all* tracked markets on every run, but the underlying lesson is broader: **for a tool that surfaces "ahead of curve" signals — which are by definition signals that just moved — data freshness is not a nice-to-have. It's the entire premise.** I should have designed for this on day one.
 
+### Specific failure modes I'd fix on day 1
+
+After multiple iterations, two failure patterns persist in the filter that I would address first with another two days:
+
+**Failure mode 1: Batch context contamination**
+
+Markets are evaluated in batches of 10 in a single LLM call. When several crypto price-target markets appear earlier in a batch, the model occasionally chains their reasoning into unrelated downstream markets. Example: the market "Fed rate hike in 2026?" was incorrectly classified as a "cryptocurrency price target" because crypto markets preceded it in the batch. The model's reasoning literally began "Similar to the previous market..." — diagnostic evidence of context leakage.
+
+**Fix:** evaluate markets individually rather than in batches. The token cost increases ~3x but the contamination is eliminated. For a research tool where false rejections cost real signals, this trade-off is worth making.
+
+**Failure mode 2: Self-contradictory output across fields**
+
+The LLM is asked to produce four related fields per market: `is_relevant` (boolean), `confidence` (float), `reason` (string), and `affected_stocks` (array). On edge cases, these fields contradict each other within a single output. Example: "Will Microsoft have the top AI model at end of June 2026?" returned MSFT as the affected stock, "positive" signal direction, and reasoning that correctly identified the read-through to MSFT's valuation — but `is_relevant=false` with `confidence=0%`.
+
+**Fix:** add a second LLM pass for any signal where `is_relevant` disagrees with the presence of valid `affected_stocks`. The second pass asks: *"Your reasoning identifies a BIT Capital holding affected by this market. Reconsider your is_relevant flag."* This is the structured equivalent of asking a junior analyst to explain why they recommended against something their own analysis supports.
+
+Both failure modes are documented and reproducible. Neither is a fundamental flaw in the architecture — they are calibration and prompt-engineering gaps that would resolve with another two days of focused iteration and a slightly higher token budget.
+
 ---
 
 ## The hardest decision I made
