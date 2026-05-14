@@ -55,7 +55,7 @@ The goal: turn ~1,200 markets per pipeline run into a 5-minute morning read with
          │ structured extraction
          ▼
 ┌──────────────────────────┐
-│  Code Judge              │  enforceValidation()
+│  Code Judge              │  validateAndClean()
 │  (the relevance decision)│  Sets is_relevant ONLY if all gates pass:
 │                          │   1. ≥1 BIT Capital ticker
 │                          │   2. probability 15–85%
@@ -100,7 +100,7 @@ This means a market about "EU antitrust action against Apple" gets classified as
 
 The prompt explicitly grounds the model: *"You are a senior research analyst at BIT Capital. Here are the only tickers you may use: NVDA, MSFT, GOOGL, META, AAPL, AMZN, AMD, ASML, TSM..."* — and names the exact rejection categories.
 
-This single design choice eliminates ~80% of the noise that a generic "is this finance-related?" filter would let through.
+This single design choice eliminates most of the noise that a generic "is this finance-related?" filter would let through.
 
 ### 2. Structured output, not free text
 
@@ -134,7 +134,7 @@ The current architecture inverts this. The LLM is now an **extractor**, not a ju
 - Tag signal type, direction, urgency
 - Self-rate confidence in the read-through
 
-**Code job (in `enforceValidation()`):**
+**Code job (in `validateAndClean()`):**
 - Decide `is_relevant` based on the LLM's structured output, using deterministic gates:
   1. **Ticker whitelist** — at least one extracted ticker must be in the 23-holding BIT Capital list
   2. **Probability gate** — market probability must sit in the **15–85% informational edge window**
@@ -148,16 +148,14 @@ A SQL-layer pre-filter ensures only markets in the 15–85% probability window a
 
 Every rejected market is logged with the specific gate that caught it, making the system fully diagnosable from server logs.
 
-### 4. The "ahead of curve" flag
+### 4. The "ahead of curve" flag — computed in code, not by the LLM
 
 A signal is only valuable if the market doesn't already know about it. The filter checks for markets where:
-- Probability sits between **15–85%** (genuine uncertainty, not consensus)
+- Probability sits between **25–75%** (genuinely contested, not near-consensus)
 - Volume > $50K (real money, not a thin market)
 - Probability has moved recently (the market is updating its view)
 
 These get flagged as **"ahead of curve"** — the window where the prediction market is pricing something in but the equity market hasn't caught up yet.
-
-### 5. Ahead of Curve is computed in code, not by the LLM
 
 The `is_ahead_of_curve` flag was originally set by the LLM based on its reasoning. This caused two problems: the LLM often lacked access to the prior-probability data needed to compute the 15pp movement criterion, and its judgment of "contested" was inconsistent run-to-run. The flag is now computed deterministically in TypeScript after the LLM call:
 
@@ -167,7 +165,7 @@ The `is_ahead_of_curve` flag was originally set by the LLM based on its reasonin
 
 This is a deliberate architecture choice: use the LLM for subjective relevance judgment, use code for objective criteria. The result is reproducible, auditable, and testable.
 
-### 6. Reports are written like analyst notes, not chatbot summaries
+### 5. Reports are written like analyst notes, not chatbot summaries
 
 The report generator uses a separate LLM call with a prompt that explicitly mimics a sell-side analyst tone: short paragraphs, named tickers, explicit direction, contrarian section at the end. Output is rendered as Markdown and exportable as PDF.
 
@@ -217,10 +215,10 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ### 5. Trigger your first pipeline
 
-Click **"Run Pipeline Now"** on the dashboard. Takes ~45–60 seconds:
+Click **"Run Pipeline Now"** on the dashboard. Takes ~3–5 minutes:
 
 - Ingests ~1,200 markets per pipeline run from Polymarket
-- Analyzes ~30–40 new markets with the LLM
+- Analyzes up to 1,200 markets per run, filtering down to 30–50 relevant signals
 - Generates a fresh morning briefing
 
 After completion, signals populate across the Dashboard, Signals page, and Reports page.
@@ -250,7 +248,9 @@ After completion, signals populate across the Dashboard, Signals page, and Repor
 
 ### Settings page
 - Edit the watched tickers list (changes flow into the next LLM call)
+- Toggle watched sector categories (AI & Machine Learning, Semiconductors, Cloud & Software, Fintech & Payments, Macro & Rates, Consumer Technology)
 - Set scheduler frequency (every 1h, 6h, 12h, 24h)
+- Toggle auto-run on/off
 
 ---
 
@@ -269,7 +269,7 @@ Polymarket-signal-scanner-/
 │   │   ├── page.tsx                   ← Dashboard
 │   │   ├── signals/page.tsx           ← Full signals database
 │   │   ├── reports/page.tsx           ← Past briefings + PDF download
-│   │   ├── settings/page.tsx          ← Watched stocks, filter sensitivity
+│   │   ├── settings/page.tsx          ← Watched stocks, watched sectors
 │   │   └── api/
 │   │       ├── ingest/                ← Fetch from Polymarket
 │   │       ├── analyze/               ← Run LLM filter
@@ -382,7 +382,7 @@ Use confidence for that. Code gates will reject low-confidence
 or weak-ticker cases automatically.
 ```
 
-The prompt deliberately tells the LLM **not** to gatekeep. The relevance decision is then made in code by `enforceValidation()`, which applies the five gates listed in section 3 above. This separation eliminates the LLM's "I named the ticker, but is_relevant=false anyway" failure mode that plagued the earlier design — see [PROJECT_LEARNINGS.md](./PROJECT_LEARNINGS.md) for the full evolution and failure-mode analysis.
+The prompt deliberately tells the LLM **not** to gatekeep. The relevance decision is then made in code by `validateAndClean()`, which applies the five gates listed in section 3 above. This separation eliminates the LLM's "I named the ticker, but is_relevant=false anyway" failure mode that plagued the earlier design — see [PROJECT_LEARNINGS.md](./PROJECT_LEARNINGS.md) for the full evolution and failure-mode analysis.
 
 ---
 
