@@ -151,6 +151,16 @@ The LLM is asked to produce four related fields per market: `is_relevant` (boole
 
 Both failure modes are documented and reproducible. Neither is a fundamental flaw in the architecture — they are calibration and prompt-engineering gaps that would resolve with another two days of focused iteration and a slightly higher token budget.
 
+### LLM non-determinism across runs
+
+Running the same pipeline twice — even on the same machine with the same markets — produces slightly different signals. GPT-4o-mini at temperature 0.1 is not deterministic. A market rated at 68% confidence in one run may come back at 71% in the next. When I ran the pipeline on a second fresh machine, the signal set was visibly different from the main machine's output.
+
+This is not a bug — it is an inherent property of LLM inference. But it means the current scanner cannot be used to reproduce a specific signal set from a given point in time. For a research tool where auditability matters, this is a real limitation.
+
+Two approaches would address this in a production system:
+- **Temperature 0**: fully deterministic outputs, at the cost of reduced variety in reasoning. Appropriate for structured extraction tasks where the LLM's job is classification, not generation.
+- **Multi-model voting**: run the same market through three models and take the majority decision. Individual model variance cancels out at the ensemble level. This is already listed as the top item in "What I'd build next."
+
 ---
 
 ## Postscript: how the failure modes were resolved
@@ -241,6 +251,12 @@ Implementation cost: ~3 days. The architecture already supports it — the LLM c
 The current `probability_24h_ago` column captures the previous ingestion's probability — not literally 24 hours ago. On a 6-hour pipeline cadence, this means "previous probability" could be 6 hours, 12 hours, or 24+ hours stale depending on when the last run happened.
 
 The fix is a separate `probability_snapshots` table that captures probability + timestamp on every ingestion, and a query that finds the snapshot closest to T-24h when computing movement. This is a 1-day build and would make the "Ahead of Curve" criterion semantically correct instead of approximately correct.
+
+### Seed data for fresh installs
+
+On a fresh install, the pipeline fetches its first batch of ~400 markets and the signal database grows slowly over subsequent runs. A reviewer cloning the repo for the first time sees a sparse database until the pipeline has run 5–10 times.
+
+The current sample_data.sql mitigates this by pre-populating 30 demo signals. A better solution would be a daily export of the top 100 signals from a running production instance, committed to the repo as seed data. This way every fresh clone starts with a representative, up-to-date signal database rather than a hand-curated static file.
 
 ### 3. Per-market analysis (eliminate batch contamination)
 

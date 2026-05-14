@@ -185,7 +185,7 @@ npm install
 
 1. Create a free project at [supabase.com](https://supabase.com)
 2. Open the SQL editor and run `supabase/schema.sql` to create the tables
-3. Optionally, run `supabase/sample_data.sql` to pre-populate demo data so you can see the UI immediately
+3. Optionally, run `supabase/sample_data.sql` to pre-populate 30 pre-analyzed demo signals so you can explore the full UI immediately without waiting for pipeline runs to accumulate data
 
 ### 3. Configure environment variables
 
@@ -221,7 +221,29 @@ Click **"Run Pipeline Now"** on the dashboard. Takes ~3–5 minutes:
 - Analyzes up to 1,200 markets per run, filtering down to 30–50 relevant signals
 - Generates a fresh morning briefing
 
-After completion, signals populate across the Dashboard, Signals page, and Reports page.
+After completion, signals begin populating across the Dashboard, Signals page, and Reports page. Note: on first run the pipeline seeds the market database for the first time — you will see an initial set of signals. The full 30–50 relevant signals build up over 3–4 pipeline runs as the database accumulates markets. The pipeline can be set to run automatically every 6 hours via the Settings page.
+
+---
+
+## Troubleshooting
+
+**Windows: "npm cannot be loaded, running scripts is disabled"**
+This is a Windows PowerShell security policy. Fix it by running:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+Then run `npm install` again.
+
+**"destination path already exists" when cloning**
+The folder was already cloned. Run `cd Polymarket-signal-scanner-` and continue from npm install.
+
+**Pipeline shows same market count after multiple runs**
+Normal on first setup. The market database accumulates over time. Run `supabase/sample_data.sql` to immediately populate demo data while the database grows.
+
+**Different machines show different signals**
+Expected behavior. Polymarket probabilities are live and change hourly. The scanner reflects market conditions at pipeline run time. Different runs at different times will naturally surface different signals — this is by design.
 
 ---
 
@@ -400,10 +422,10 @@ Documented in detail in [PROJECT_LEARNINGS.md](./PROJECT_LEARNINGS.md). Short li
 
 ## Submission notes
 
-- **Markets per pipeline run:** ~1,200
+- **Markets per pipeline run:** ~400 on first run, accumulating to 4,000+ over a week of scheduled runs
 - **Pipeline runtime:** ~3–5 minutes
-- **Relevant signals per run:** 30–50
-- **Database stores:** ~4,000 historical markets
+- **Relevant signals per run:** 5–10 on first run, 30–50 after database accumulates
+- **Database after one week:** ~4,000 historical markets tracked
 
 ---
 
