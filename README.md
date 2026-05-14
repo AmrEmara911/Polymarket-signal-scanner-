@@ -43,11 +43,11 @@ The Dashboard surfaces the day's top signals with affected BIT Capital tickers, 
 
 The full database of analyzed markets. Analysts can filter by urgency, signal type, direction, or Ahead of Curve flag. Each signal includes its LLM-generated reasoning, affected stocks, and a direct link back to the source market.
 
-### Morning Briefing — Analyst-grade output
+### Settings — Watched stocks, sectors & pipeline schedule
 
-![BIT Capital morning briefing with Market Pulse, Top 3 Signals, and Portfolio Exposure Summary](./screenshots/morning-briefing.png)
+![Settings page showing watched ticker list, sector checkboxes, and pipeline schedule configuration](./screenshots/settings.png)
 
-The auto-generated morning briefing, structured like a sell-side research note: Market Pulse, Top 3 Signals to Act On (with portfolio impact and conviction levels), Portfolio Exposure Summary, Contrarian Take, What to Watch Today, and Risk to This View. One-click PDF export.
+The Configuration page lets analysts edit the watched ticker list (fed directly into the next LLM call), toggle sector categories, set pipeline frequency (every 1h, 6h, 12h, or 24h), and enable auto-run. Changes take effect on the next pipeline execution.
 
 ---
 
