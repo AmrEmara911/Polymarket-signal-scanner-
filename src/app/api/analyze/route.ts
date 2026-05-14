@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 
 async function handler(req: NextRequest) {
   try {
-    const result = await analyzeMarkets(100);
+    const result = await analyzeMarkets(1200);
     return NextResponse.json({ success: true, ...result });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';

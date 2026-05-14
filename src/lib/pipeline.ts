@@ -32,7 +32,7 @@ export async function runPipeline(): Promise<PipelineResult> {
 
   try {
     const marketsIngested = await fetchAndStoreMarkets();
-    const analysis = await analyzeMarkets(100);
+    const analysis = await analyzeMarkets(1200);
     const report = await generateSignalReport();
 
     if (run?.id) {

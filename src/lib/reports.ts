@@ -68,17 +68,24 @@ function reportUtilityScore(signal: SignalWithMarket) {
   const question = signal.markets?.question ?? '';
   if (isDirectEquityPriceMarket(question)) return -1;
 
+  const probability = signal.markets?.probability;
+  if (typeof probability === 'number' && (probability >= 0.95 || probability <= 0.05)) {
+    return -1;
+  }
+
+  const volume = signal.markets?.volume ?? 0;
+  if (volume < 1_000) return -1;
+
   let score = signal.relevance_score * 0.45 + signal.confidence * 0.25;
   const type = signal.signal_type?.toLowerCase();
 
   if (['rates', 'tariff', 'regulatory', 'macro', 'crypto'].includes(type ?? '')) score += 0.18;
-  if (type === 'company' && (signal.markets?.volume ?? 0) >= 10_000) score += 0.08;
-  if ((signal.markets?.volume ?? 0) >= 50_000) score += 0.08;
-  if ((signal.markets?.volume ?? 0) < 10_000) score -= 0.20;
+  if (type === 'company' && volume >= 10_000) score += 0.08;
+  if (volume >= 50_000) score += 0.08;
+  if (volume < 10_000) score -= 0.20;
   if (signal.affected_stocks?.length) score += 0.06;
   if (signal.thesis?.length > 120) score += 0.04;
 
-  const probability = signal.markets?.probability;
   if (typeof probability === 'number' && probability > 0.1 && probability < 0.9) score += 0.04;
   if (typeof probability === 'number' && (probability >= 0.97 || probability <= 0.03)) score -= 0.16;
   if (typeof probability === 'number' && probability >= 0.93 && type === 'company') score -= 0.18;

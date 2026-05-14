@@ -1,9 +1,28 @@
+import OpenAI from 'openai';
 import { getAnalystConfig } from './analyst-config';
 import { sortMarketsForAnalysis } from './market-prioritization';
-import { callOpenAIJson } from './openai';
 import { getSupabaseClient } from './supabase';
 
-const BATCH_SIZE = 10;
+const BATCH_SIZE = 5;
+const ANALYSIS_MODEL = "gpt-4o-mini";
+const ANALYSIS_PROMPT_VERSION = "filter-v4-coverage";
+const ANALYSIS_MODEL_TAG = `${ANALYSIS_MODEL}:${ANALYSIS_PROMPT_VERSION}`;
+const ANALYSIS_CONCURRENCY = 12;
+const MIN_RELEVANT_VOLUME_USD = 50;
+const HOLDINGS = [
+  'NVDA','MSFT','GOOGL','GOOG','META','AAPL','AMZN','AMD','ASML','TSM',
+  'ORCL','ADBE','CRM','NOW','PLTR','ARM','AVGO','QCOM','INTC','MU','NFLX',
+  'SHOP','COIN','AMAT','V','MA','PYPL','ADYEN','IREN','SOFI','RDDT','HIMS',
+  'LMND','HNGE','CRCL','APLD','COHR','GLXY','NTSK',
+];
+const HOLDINGS_SET = new Set(HOLDINGS);
+const TICKER_ALIASES: Record<string, string> = {
+  TSMC: 'TSM',
+  GOOGLE: 'GOOGL',
+  ALPHABET: 'GOOGL',
+  VISA: 'V',
+  PAYPAL: 'PYPL',
+};
 const MOVEMENT_BASELINE_MIN_AGE_MS = 6 * 60 * 60 * 1000;
 const MOVEMENT_THRESHOLD = 0.05;
 
@@ -24,16 +43,37 @@ const STOCK_TO_BUCKETS: Record<string, ThematicBucket[]> = {
   IREN: ['AI Infrastructure', 'Digital Assets'],
   MSFT: ['Big Tech Platforms'],
   GOOGL: ['Big Tech Platforms'],
+  GOOG: ['Big Tech Platforms'],
   META: ['Big Tech Platforms'],
   NVDA: ['AI Infrastructure'],
   AMD: ['AI Infrastructure'],
+  ASML: ['AI Infrastructure'],
+  TSM: ['AI Infrastructure'],
+  AMAT: ['AI Infrastructure'],
+  AVGO: ['AI Infrastructure'],
+  QCOM: ['AI Infrastructure'],
+  INTC: ['AI Infrastructure'],
+  MU: ['AI Infrastructure'],
+  ARM: ['AI Infrastructure'],
   AMZN: ['Big Tech Platforms'],
   AAPL: ['Big Tech Platforms'],
   RDDT: ['Big Tech Platforms'],
+  ORCL: ['Big Tech Platforms'],
+  ADBE: ['Big Tech Platforms'],
+  CRM: ['Big Tech Platforms'],
+  NOW: ['Big Tech Platforms'],
+  PLTR: ['Big Tech Platforms'],
+  NFLX: ['Big Tech Platforms'],
+  SHOP: ['Big Tech Platforms'],
   HIMS: ['Fintech', 'Digital Health'],
   LMND: ['Fintech', 'Digital Health'],
   HNGE: ['Digital Health'],
   SOFI: ['Fintech'],
+  V: ['Fintech'],
+  MA: ['Fintech'],
+  PYPL: ['Fintech'],
+  ADYEN: ['Fintech'],
+  COIN: ['Fintech', 'Digital Assets'],
   CRCL: ['Fintech', 'Digital Assets'],
   APLD: ['AI Infrastructure'],
   COHR: ['AI Infrastructure'],
@@ -91,8 +131,8 @@ export interface ParsedSignal {
   confidence: number;
   reason: string;
   affected_stocks: string[];
-  signal_type: 'macro' | 'rates' | 'tariff' | 'regulatory' | 'company' | 'sector' | 'crypto' | 'supply_chain' | null;
-  signal_direction: 'positive' | 'negative' | 'mixed' | 'unclear' | null;
+  signal_type: 'macro' | 'rates' | 'tariff' | 'regulation' | 'regulatory' | 'company' | 'sector' | 'crypto' | 'supply_chain' | 'geopolitical' | null;
+  signal_direction: 'positive' | 'negative' | 'mixed' | 'neutral' | 'unclear' | null;
   urgency: 'high' | 'medium' | 'low' | null;
   thematic_buckets: string[];
   is_ahead_of_curve: boolean;
@@ -118,401 +158,448 @@ type MutableSignalRow = Record<string, unknown> & {
   market_id: string;
 };
 
-const SYSTEM_PROMPT = `You are an extraction assistant for BIT Capital, a Berlin-based
-asset manager focused on global technology equities. Your job is
-to extract structured information about each Polymarket prediction
-market — NOT to decide whether it is "worth trading." Code-level
-gates downstream will make the final relevance decision based on
-your extracted fields.
+const SYSTEM_PROMPT = `
+You are a senior research analyst at BIT Capital, a Berlin-based
+asset manager focused on global technology equities.
 
-BIT CAPITAL HOLDINGS (the only tickers you may use):
+BIT CAPITAL TRACKED HOLDINGS:
 NVDA, MSFT, GOOGL, GOOG, META, AAPL, AMZN, AMD, ASML, TSM,
 ORCL, ADBE, CRM, NOW, PLTR, ARM, AVGO, QCOM, INTC, MU, NFLX,
-SHOP, COIN
+SHOP, COIN, AMAT, V, MA, PYPL, ADYEN, IREN, SOFI, RDDT, HIMS,
+LMND, HNGE, CRCL, APLD, COHR, GLXY, NTSK
 
-YOUR JOB IS SIMPLE:
+A signal is RELEVANT if it meets BOTH of these:
+1. You can name at least one specific ticker from the holdings
+   list in affected_stocks. If you cannot, is_relevant=false.
+2. The market outcome would plausibly move that ticker's price,
+   sentiment, or competitive position — even indirectly. Be
+   GENEROUS here: macro signals, regulatory signals, competitor
+   movements, supply chain events, geopolitical events affecting
+   tech supply chains, AI model rankings, IPO announcements, and
+   earnings-related markets all qualify as long as a tracked
+   ticker is genuinely affected.
 
-For each market, name the BIT Capital holdings whose share price
-would plausibly respond to this market's outcome. Be GENEROUS in
-naming tickers — if there's any reasonable read-through, include
-the ticker. The code gates downstream will filter for quality;
-your job is to ensure no real signal is missed.
+REJECT ONLY:
+- Pure price-target markets with no underlying event ("Will X
+  reach $Y price?")
+- Markets where ALL affected tickers are NOT in the BIT Capital
+  holdings list
+- Sports, weather, celebrity, entertainment, music, gaming
+- Markets with less than $50 volume
+- Resolved or near-resolved markets (probability >99% or <1%)
+- Markets resolving in less than 12 hours
 
-MARK is_relevant = true IF:
-- The market mentions or affects any company/sector/macro factor
-  that has read-through to ANY ticker in the holdings list above.
-- Examples of "read-through": competitive dynamics, supply chain,
-  regulatory pressure, macro multiples, M&A activity, AI capability
-  benchmarks (matters for MSFT/GOOGL/META/NVDA).
+When in doubt between relevant and not relevant, choose RELEVANT
+with a moderate confidence score (0.55-0.70). Better to surface
+a borderline signal than miss a real one.
 
-MARK is_relevant = false ONLY IF:
-- The market is about sports, entertainment, weather, celebrities.
-- The market is a pure crypto price target ("Will BTC reach $X?")
-  AND there is no spillover to COIN.
-- The market is about a private company (SpaceX, xAI, Anthropic)
-  with NO read-through to public holdings. Note: Anthropic affects
-  GOOGL/AMZN (investors); OpenAI affects MSFT (investor + Azure).
-- The market is a direct price-target on a stock ("Will NVDA hit
-  $X?") — this restates pricing, not a catalyst.
-- The market is a state-level political race, single-candidate
-  primary, gubernatorial/mayoral race, or local election. These
-  are too indirect to give tech equity edge.
-- The market is a narrow-band exact-outcome bet ("Will GDP be
-  between 4.6% and 4.9%?"). These bet on landing zones, not
-  directions, and provide no analytical edge.
-
-REASONING DISCIPLINE:
-
-A real signal has a SHORT chain of reasoning: market outcome →
-direct impact on a named company's near-term P&L or valuation.
-
-A long chain is a red flag: market outcome → policy change →
-regulatory implementation → company strategy shift → financial
-impact. If you find yourself writing phrases like "could have
-implications," "might affect," "if the winner has a stance on,"
-or "potentially impact" — the chain is too long. Set is_relevant
-to false.
-
-GUIDANCE FOR MACRO MARKETS:
-
-Fed rate decisions, CPI prints, jobs reports, tariff announcements,
-AI regulation, antitrust rulings, and export controls all affect
-tech multiples. For these, name the MOST EXPOSED holdings:
-- Rates/macro/recession → MSFT, GOOGL, META, NVDA, AAPL
-- AI regulation → MSFT, GOOGL, META, NVDA
-- China/Taiwan/export controls → NVDA, AMD, ASML, TSM, AAPL
-- Antitrust → the named company (AAPL, GOOGL, AMZN, META)
-
-CONFIDENCE: Reflects how confident you are in the read-through.
-- 0.80+: Direct, named company event with clear near-term P&L impact.
-- 0.65-0.79: Strong thematic exposure with identified ticker(s).
-- 0.50-0.64: Plausible read-through, real but indirect.
-- Below 0.50: Very weak connection — but still try to name tickers.
-
-Do NOT set is_relevant = false purely because you are uncertain.
-Use confidence for that. Code gates will reject low-confidence
-or weak-ticker cases automatically.
+SIGNAL DIRECTION RULES (critical — get these right):
+- If a competitor (ByteDance, Mistral, Meta AI) beats MSFT/GOOGL
+  at AI → signal_direction = "negative" for MSFT/GOOGL
+- If regulation passes that restricts tech → "negative"
+- If Fed cuts rates → "positive" for growth tech
+- If Fed hikes rates → "negative" for growth tech
+- If OpenAI IPO succeeds → "positive" for MSFT (they hold equity)
+- If AI safety bill passes → "negative" for AI infrastructure
 
 FEW-SHOT EXAMPLES:
-Market: "Will the Fed cut rates by June 2026?"
+
+Input: "Will the Fed cut rates by September 2026?"
+Probability: 0.149, Volume: $920K
 Output: {
-"is_relevant": true,
-"confidence": 0.85,
-"reason": "Direct macro signal for tech multiples; rate cuts
-benefit growth equity valuations across BIT Capital's core
-holdings.",
-"affected_stocks": ["MSFT", "GOOGL", "META", "NVDA"],
-"signal_type": "macro",
-"signal_direction": "positive",
-"urgency": "high",
-"thematic_buckets": ["Macro/Rates", "Big Tech Platforms"],
-"is_ahead_of_curve": false
+  "is_relevant": true,
+  "confidence": 0.82,
+  "reason": "Fed rate cuts directly improve growth equity
+    valuations across BIT Capital holdings via discount rate
+    channel. $920K volume confirms serious institutional
+    attention.",
+  "affected_stocks": ["MSFT", "GOOGL", "META", "NVDA"],
+  "signal_type": "macro",
+  "signal_direction": "positive",
+  "urgency": "high",
+  "thematic_buckets": ["Macro/Rates", "Big Tech Platforms"],
+  "is_ahead_of_curve": false
 }
-Market: "Will TSMC announce Arizona fab delay before Q3?"
+
+Input: "Will EU AI Act enforcement begin before June 2026?"
+Probability: 0.42, Volume: $180K
 Output: {
-"is_relevant": true,
-"confidence": 0.82,
-"reason": "Supply chain disruption for advanced node capacity
-directly impacts NVDA, AMD, and AAPL production timelines.",
-"affected_stocks": ["TSM", "NVDA", "AMD", "AAPL"],
-"signal_type": "supply_chain",
-"signal_direction": "negative",
-"urgency": "medium",
-"thematic_buckets": ["Semiconductors"],
-"is_ahead_of_curve": true
+  "is_relevant": true,
+  "confidence": 0.76,
+  "reason": "EU AI Act enforcement creates direct compliance
+    costs for MSFT Copilot, GOOGL Gemini, and META AI products
+    sold in Europe. Specific regulatory catalyst with named
+    deadline.",
+  "affected_stocks": ["MSFT", "GOOGL", "META"],
+  "signal_type": "regulation",
+  "signal_direction": "negative",
+  "urgency": "medium",
+  "thematic_buckets": ["AI Regulation", "Big Tech Platforms"],
+  "is_ahead_of_curve": true
 }
-Market: "Will OpenAI IPO close above $800B market cap?"
+
+Input: "Will inflation reach more than 5% in 2026?"
+Probability: 0.305, Volume: $112K
 Output: {
-"is_relevant": true,
-"confidence": 0.78,
-"reason": "MSFT holds a significant equity stake in OpenAI.
-An $800B+ IPO valuation has direct read-through to MSFT's
-book value and AI infrastructure thesis.",
-"affected_stocks": ["MSFT"],
-"signal_type": "company",
-"signal_direction": "positive",
-"urgency": "high",
-"thematic_buckets": ["AI Infrastructure", "Big Tech Platforms"],
-"is_ahead_of_curve": false
+  "is_relevant": true,
+  "confidence": 0.74,
+  "reason": "Persistent inflation above 5% forces Fed to
+    maintain high rates, compressing growth multiples across
+    BIT Capital's core holdings. Macro signal with direct
+    portfolio impact.",
+  "affected_stocks": ["MSFT", "GOOGL", "META", "NVDA"],
+  "signal_type": "macro",
+  "signal_direction": "negative",
+  "urgency": "high",
+  "thematic_buckets": ["Macro/Rates"],
+  "is_ahead_of_curve": false
 }
-Market: "Will Bitcoin be above $76,000 on May 10?"
+
+Input: "Will Gemini 3.5 be released by July 31?"
+Probability: 0.845, Volume: $16K
 Output: {
-"is_relevant": false,
-"confidence": 0.95,
-"reason": "Pure crypto price target with no specific catalyst.
-No BIT Capital ticker has direct exposure to this outcome.",
-"affected_stocks": [],
-"signal_type": null,
-"signal_direction": null,
-"urgency": null,
-"thematic_buckets": [],
-"is_ahead_of_curve": false
+  "is_relevant": true,
+  "confidence": 0.71,
+  "reason": "Gemini 3.5 release directly impacts GOOGL's AI
+    competitive position and developer adoption metrics.
+    Product launch catalyst with specific deadline.",
+  "affected_stocks": ["GOOGL"],
+  "signal_type": "company",
+  "signal_direction": "positive",
+  "urgency": "high",
+  "thematic_buckets": ["AI Infrastructure", "Big Tech Platforms"],
+  "is_ahead_of_curve": false
 }
-Market: "Will SpaceX IPO above $1.4T?"
+
+Input: "Will ByteDance have the #1 AI model by December 2026?"
+Probability: 0.155, Volume: $958
 Output: {
-"is_relevant": false,
-"confidence": 0.90,
-"reason": "SpaceX is private. No BIT Capital holding has
-material direct exposure to SpaceX's valuation.",
-"affected_stocks": [],
-"signal_type": null,
-"signal_direction": null,
-"urgency": null,
-"thematic_buckets": [],
-"is_ahead_of_curve": false
+  "is_relevant": true,
+  "confidence": 0.65,
+  "reason": "ByteDance achieving #1 AI model ranking would
+    indicate competitive pressure on MSFT Copilot and GOOGL
+    Gemini, threatening their AI revenue growth.",
+  "affected_stocks": ["MSFT", "GOOGL"],
+  "signal_type": "company",
+  "signal_direction": "negative",
+  "urgency": "medium",
+  "thematic_buckets": ["AI Infrastructure"],
+  "is_ahead_of_curve": false
 }
-Market: "Will GameStop acquire eBay?"
+
+Input: "Will Bitcoin be above $88,000 on May 12?"
+Probability: 0.001, Volume: $92K
 Output: {
-"is_relevant": false,
-"confidence": 0.95,
-"reason": "Neither company is in BIT Capital's tech holdings
-universe. Not a tech sector signal.",
-"affected_stocks": [],
-"signal_type": null,
-"signal_direction": null,
-"urgency": null,
-"thematic_buckets": [],
-"is_ahead_of_curve": false
-}
-Return a JSON object with a "signals" array containing one
-analyzed signal per input market, in the same order.`;
-
-// Per-pipeline-run counters for diagnostic logging.
-// The LLM no longer gatekeeps relevance — code does — so there is no
-// "llm_rejected" bucket. Every rejection happens at one of these gates.
-const rejectionStats = {
-  no_stocks: 0,
-  no_valid_ticker: 0,
-  probability_extreme: 0,
-  expires_soon: 0,
-  price_target: 0,
-  low_confidence: 0,
-  thin_volume: 0,
-  political_noise: 0,
-  narrow_band: 0,
-  passed: 0,
-};
-
-function resetRejectionStats() {
-  rejectionStats.no_stocks = 0;
-  rejectionStats.no_valid_ticker = 0;
-  rejectionStats.probability_extreme = 0;
-  rejectionStats.expires_soon = 0;
-  rejectionStats.price_target = 0;
-  rejectionStats.low_confidence = 0;
-  rejectionStats.thin_volume = 0;
-  rejectionStats.political_noise = 0;
-  rejectionStats.narrow_band = 0;
-  rejectionStats.passed = 0;
+  "is_relevant": false,
+  "confidence": 0.97,
+  "reason": "Pure crypto price target with no specific catalyst.
+    No BIT Capital ticker has direct exposure.",
+  "affected_stocks": [],
+  "signal_type": null,
+  "signal_direction": null,
+  "urgency": null,
+  "thematic_buckets": [],
+  "is_ahead_of_curve": false
 }
 
-function logRejectionStats() {
-  console.log(`[Filter] === Rejection breakdown ===`);
-  console.log(`[Filter]   No affected_stocks:        ${rejectionStats.no_stocks}`);
-  console.log(`[Filter]   No valid ticker:           ${rejectionStats.no_valid_ticker}`);
-  console.log(`[Filter]   Probability outside 15-85: ${rejectionStats.probability_extreme}`);
-  console.log(`[Filter]   Expires within 24h:        ${rejectionStats.expires_soon}`);
-  console.log(`[Filter]   Direct price-target:       ${rejectionStats.price_target}`);
-  console.log(`[Filter]   Confidence < 0.45:         ${rejectionStats.low_confidence}`);
-  console.log(`[Filter]   Volume < $10K (thin):      ${rejectionStats.thin_volume}`);
-  console.log(`[Filter]   Political/election noise:  ${rejectionStats.political_noise}`);
-  console.log(`[Filter]   Narrow-band exact outcome: ${rejectionStats.narrow_band}`);
-  console.log(`[Filter]   PASSED:                    ${rejectionStats.passed}`);
+Input: "Will SpaceX IPO above $1.4T?"
+Probability: 0.895, Volume: $95K
+Output: {
+  "is_relevant": false,
+  "confidence": 0.92,
+  "reason": "SpaceX is private. No BIT Capital holding has
+    material direct exposure to SpaceX valuation.",
+  "affected_stocks": [],
+  "signal_type": null,
+  "signal_direction": null,
+  "urgency": null,
+  "thematic_buckets": [],
+  "is_ahead_of_curve": false
 }
 
-// --- HELPERS for the new noise gates -----------------------------------
-
-const MIN_VOLUME_USD = 10_000;
-
-// Markets like "Will X win the 2026 [State] [Party] Primary?" or
-// "Will Y win the [Year] [State] [Office] race?" — single-candidate,
-// state-level, or primary races are too indirect to give tech equity edge.
-function isElectionNoise(question: string): boolean {
-  const q = question.toLowerCase();
-  const hasPersonNamed = /\bwill\s+[a-z][a-z\-']+\s+[a-z][a-z\-']+\s+(win|become|be elected)/i.test(question);
-  const hasElectionTerm =
-    q.includes('primary') ||
-    q.includes('gubernatorial') ||
-    q.includes('senate race') ||
-    q.includes('house race') ||
-    q.includes('governor of') ||
-    q.includes('mayor of') ||
-    q.includes('nominee') ||
-    q.includes('caucus');
-  return hasPersonNamed && hasElectionTerm;
+Input: "Will Abdul El-Sayed win the Michigan Democratic Primary?"
+Probability: 0.54, Volume: $103K
+Output: {
+  "is_relevant": false,
+  "confidence": 0.88,
+  "reason": "State-level primary election. No specific tech
+    policy catalyst that would directly move BIT Capital
+    holdings. Read-through too indirect.",
+  "affected_stocks": [],
+  "signal_type": null,
+  "signal_direction": null,
+  "urgency": null,
+  "thematic_buckets": [],
+  "is_ahead_of_curve": false
 }
 
-// Markets like "Will X be between A.B% and C.D%?" or
-// "Will X be between A and B?" with a narrow band bet on an exact
-// outcome rather than a direction. These have ~50% probability by
-// construction and offer no analyst edge over the consensus.
-function isNarrowBandExactOutcome(question: string): boolean {
-  const q = question.toLowerCase();
-  if (!q.includes('between')) return false;
-  // Look for "between X and Y" with numeric bounds
-  const match = q.match(/between\s+(-?\d+(?:\.\d+)?)\s*%?\s+and\s+(-?\d+(?:\.\d+)?)\s*%?/);
-  if (!match) return false;
-  const low = parseFloat(match[1]);
-  const high = parseFloat(match[2]);
-  if (!Number.isFinite(low) || !Number.isFinite(high)) return false;
-  const band = Math.abs(high - low);
-  const midpoint = Math.abs((high + low) / 2) || 1;
-  // Relative band width — if the band is <20% of the midpoint magnitude,
-  // this is a narrow exact-outcome bet, not a directional signal.
-  return band / midpoint < 0.2;
+Input: "Will Apple market cap exceed Microsoft by Dec 2026?"
+Probability: 0.31, Volume: $145K
+Output: {
+  "is_relevant": true,
+  "confidence": 0.62,
+  "reason": "Direct competitive positioning signal between two
+    major BIT Capital holdings. Outcome reflects relative growth
+    expectations and AI monetization narratives for both AAPL
+    and MSFT.",
+  "affected_stocks": ["AAPL", "MSFT"],
+  "signal_type": "company",
+  "signal_direction": "neutral",
+  "urgency": "medium",
+  "thematic_buckets": ["Big Tech Platforms"],
+  "is_ahead_of_curve": false
 }
 
-function enforceValidation(signal: ParsedSignal, market: MarketForAnalysis): ParsedSignal {
-  // ARCHITECTURE: The CODE is the relevance judge, not the LLM.
-  // The LLM is used only as an extractor. We compute is_relevant from
-  // the structured fields (affected_stocks, confidence) plus market
-  // properties (probability, end_date, question shape). This sidesteps
-  // the LLM's documented tendency to mark valid signals as not-relevant
-  // out of misplaced caution (see PROJECT_LEARNINGS.md "Specific failure
-  // modes" — self-contradictory output across fields).
+Input: "Will US impose 25% tariffs on Chinese semiconductors?"
+Probability: 0.48, Volume: $620K
+Output: {
+  "is_relevant": true,
+  "confidence": 0.78,
+  "reason": "Direct supply chain and cost impact for NVDA, AMD,
+    AAPL, and TSM. Major catalyst with bipartisan support —
+    market is split, making this a genuine ahead-of-curve signal.",
+  "affected_stocks": ["NVDA", "AMD", "AAPL", "TSM"],
+  "signal_type": "regulation",
+  "signal_direction": "negative",
+  "urgency": "high",
+  "thematic_buckets": ["Semiconductors", "Geopolitics"],
+  "is_ahead_of_curve": true
+}
 
-  const HOLDINGS = [
-    'NVDA','MSFT','GOOGL','GOOG','META','AAPL','AMZN','AMD',
-    'ASML','TSM','ORCL','ADBE','CRM','NOW','PLTR','ARM',
-    'AVGO','QCOM','INTC','MU','NFLX','SHOP','COIN',
-  ];
+Input: "Will Q3 2026 GDP growth exceed 2.5%?"
+Probability: 0.42, Volume: $89K
+Output: {
+  "is_relevant": true,
+  "confidence": 0.58,
+  "reason": "GDP growth above trend supports continued Fed
+    hawkishness, pressuring growth tech valuations. Moderate
+    indirect read-through to MSFT, GOOGL, META through rate
+    expectations channel.",
+  "affected_stocks": ["MSFT", "GOOGL", "META"],
+  "signal_type": "macro",
+  "signal_direction": "negative",
+  "urgency": "medium",
+  "thematic_buckets": ["Macro/Rates"],
+  "is_ahead_of_curve": false
+}
 
-  // STAGE 1: Sanity-clean the LLM's structured output.
-  const rawStocks = (signal.affected_stocks || []).filter(
-    (t) => t && t !== 'None' && t !== 'NONE'
-  );
-  const validTickers = rawStocks.filter((t) => HOLDINGS.includes(t));
+Input: "Will the US further restrict Nvidia chip exports to China before Q4 2026?"
+Probability: 0.38, Volume: $410K
+Output: {
+  "is_relevant": true,
+  "confidence": 0.83,
+  "reason": "Export restrictions would directly reduce addressable China revenue for NVDA and AMD while pressuring AI supply chain sentiment. Specific regulatory catalyst with clear semiconductor exposure.",
+  "affected_stocks": ["NVDA", "AMD", "ASML", "TSM"],
+  "signal_type": "regulation",
+  "signal_direction": "negative",
+  "urgency": "high",
+  "thematic_buckets": ["AI Infrastructure", "Semiconductors", "Geopolitics"],
+  "is_ahead_of_curve": true
+}
 
-  // Compute a base "should be relevant" from the structured signals.
-  // Confidence here is the LLM's own self-rating — we still trust this
-  // as a noisiness signal, but no longer trust its is_relevant verdict.
-  const confidence = typeof signal.confidence === 'number' ? signal.confidence : 0;
+Input: "Will DOJ win its Google adtech antitrust case before 2027?"
+Probability: 0.44, Volume: $260K
+Output: {
+  "is_relevant": true,
+  "confidence": 0.79,
+  "reason": "A DOJ win would create direct remedy risk for GOOGL's adtech stack and could change platform economics. Named legal catalyst tied to a tracked holding.",
+  "affected_stocks": ["GOOGL"],
+  "signal_type": "regulation",
+  "signal_direction": "negative",
+  "urgency": "high",
+  "thematic_buckets": ["Big Tech Platforms", "AI Regulation"],
+  "is_ahead_of_curve": true
+}
 
-  // STAGE 2: Apply hard code gates in priority order.
-  // First, hard architectural rejects (gates 1, 3, 4, 5, 6).
-  // Then, soft quality rejects (gate 2 — low confidence).
+Input: "Will OpenAI release GPT-5 before December 2026?"
+Probability: 0.52, Volume: $340K
+Output: {
+  "is_relevant": true,
+  "confidence": 0.73,
+  "reason": "A major OpenAI model release would strengthen MSFT's Copilot and Azure AI positioning through its OpenAI partnership. Product launch catalyst with direct competitive read-through.",
+  "affected_stocks": ["MSFT"],
+  "signal_type": "company",
+  "signal_direction": "positive",
+  "urgency": "medium",
+  "thematic_buckets": ["AI Infrastructure", "Big Tech Platforms"],
+  "is_ahead_of_curve": false
+}
 
-  // GATE 1: Must have at least one valid BIT Capital ticker.
-  if (validTickers.length === 0) {
-    if (rawStocks.length > 0) {
-      // LLM tried to name tickers but none are in our universe.
-      rejectionStats.no_valid_ticker += 1;
-      console.log(`[Filter] REJECT no_valid_ticker: "${market.question.substring(0, 80)}" | LLM named ${JSON.stringify(rawStocks)} — none in holdings list`);
-    } else {
-      rejectionStats.no_stocks += 1;
-      console.log(`[Filter] REJECT no_stocks: "${market.question.substring(0, 80)}"`);
-    }
-    return { ...signal, affected_stocks: validTickers, is_relevant: false };
+Input: "Will a US stablecoin bill pass before September 2026?"
+Probability: 0.46, Volume: $275K
+Output: {
+  "is_relevant": true,
+  "confidence": 0.76,
+  "reason": "Stablecoin legislation directly affects COIN, CRCL, PYPL, and digital asset infrastructure sentiment. Specific regulatory catalyst with clear fintech exposure.",
+  "affected_stocks": ["COIN", "CRCL", "PYPL"],
+  "signal_type": "regulation",
+  "signal_direction": "positive",
+  "urgency": "high",
+  "thematic_buckets": ["Fintech", "Digital Assets"],
+  "is_ahead_of_curve": true
+}
+
+Input: "Will Texas pass new data center power restrictions before 2027?"
+Probability: 0.36, Volume: $44K
+Output: {
+  "is_relevant": true,
+  "confidence": 0.7,
+  "reason": "Data center power restrictions would affect AI infrastructure buildout economics for IREN, APLD, NVDA, and cloud platforms. Specific policy catalyst tied to compute capacity.",
+  "affected_stocks": ["IREN", "APLD", "NVDA", "MSFT", "GOOGL"],
+  "signal_type": "regulation",
+  "signal_direction": "negative",
+  "urgency": "medium",
+  "thematic_buckets": ["AI Infrastructure"],
+  "is_ahead_of_curve": true
+}
+
+Input: "Will Reddit announce a major AI data licensing deal before 2027?"
+Probability: 0.28, Volume: $18K
+Output: {
+  "is_relevant": true,
+  "confidence": 0.66,
+  "reason": "A major AI data licensing deal would directly affect RDDT monetization and could influence data access costs for MSFT, GOOGL, and META. Company catalyst with AI platform read-through.",
+  "affected_stocks": ["RDDT", "MSFT", "GOOGL", "META"],
+  "signal_type": "company",
+  "signal_direction": "positive",
+  "urgency": "medium",
+  "thematic_buckets": ["Big Tech Platforms", "AI Infrastructure"],
+  "is_ahead_of_curve": false
+}
+
+Input: "Will Nvidia hit (HIGH) $224 this week?"
+Probability: 0.33, Volume: $210K
+Output: {
+  "is_relevant": false,
+  "confidence": 0.94,
+  "reason": "Pure equity price-level market with no underlying catalyst. It restates market pricing rather than identifying a BIT Capital signal.",
+  "affected_stocks": [],
+  "signal_type": null,
+  "signal_direction": null,
+  "urgency": null,
+  "thematic_buckets": [],
+  "is_ahead_of_curve": false
+}
+
+Input: "Will WTI Crude Oil hit (HIGH) $130 in May?"
+Probability: 0.115, Volume: $1.1M
+Output: {
+  "is_relevant": false,
+  "confidence": 0.91,
+  "reason": "Pure commodity price-level market with no policy, supply, or demand catalyst. Any tech read-through is too generic without an underlying event.",
+  "affected_stocks": [],
+  "signal_type": null,
+  "signal_direction": null,
+  "urgency": null,
+  "thematic_buckets": [],
+  "is_ahead_of_curve": false
+}
+
+Return a JSON object:
+{
+  "signals": [
+    { ...signal1 },
+    { ...signal2 }
+  ]
+}
+One signal per market, in the same order as the input.
+`;
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+function buildUserPrompt(batch: MarketForAnalysis[]): string {
+  return `Analyze these ${batch.length} markets. Return a JSON object with
+a 'signals' array containing one result per market in order:
+
+${batch.map((m, i) => `Market ${i+1}: "${m.question}"
+Probability: ${m.probability} | Volume: $${m.volume}`).join('\n\n')}`;
+}
+
+function isPurePriceLevelMarket(market: MarketForAnalysis): boolean {
+  const question = market.question.toLowerCase();
+  const hasDollarLevel = /\$\s*\d/.test(market.question);
+  const hasPriceLevelShape =
+    question.includes('hit (high)') ||
+    question.includes('hit (low)') ||
+    /\b(hit|reach|above|below|close above|close below|finish above|finish below|end above|end below)\b[^?]*\$\s*\d/i.test(market.question);
+  const hasUnderlyingCatalyst =
+    /\b(ipo|market cap|tariff|rate|cut|hike|earnings|revenue|approval|deal|ban|regulation|ruling|launch|release|export|import|sanction|merger|acquisition)\b/i.test(
+      market.question
+    );
+
+  return hasDollarLevel && hasPriceLevelShape && !hasUnderlyingCatalyst;
+}
+
+function normalizeTicker(ticker: string): string {
+  const normalized = ticker.trim().toUpperCase();
+  return TICKER_ALIASES[normalized] ?? normalized;
+}
+
+function validateAndClean(signal: any, market: MarketForAnalysis): any {
+  const validTickers = (signal.affected_stocks || [])
+    .map((t: string) => normalizeTicker(String(t)))
+    .filter((t: string) => HOLDINGS_SET.has(t));
+  const uniqueValidTickers = Array.from(new Set(validTickers));
+
+  if (signal.is_relevant && uniqueValidTickers.length === 0) {
+    signal.is_relevant = false;
+    signal.reason = signal.reason +
+      " [Auto-rejected: no BIT Capital ticker identified]";
   }
 
-  // GATE 4: Probability outside 15–85% informational edge window.
-  const prob = market.probability ?? 0.5;
-  if (prob > 0.85 || prob < 0.15) {
-    rejectionStats.probability_extreme += 1;
-    console.log(`[Filter] REJECT probability_extreme (${(prob * 100).toFixed(0)}%): "${market.question.substring(0, 80)}"`);
-    return {
-      ...signal,
-      affected_stocks: validTickers,
-      is_relevant: false,
-      reason: `Probability ${(prob * 100).toFixed(0)}% is outside the 15–85% informational edge window — outcome has reached consensus and is already priced into public markets.`,
-    };
+  // Rule 2: Confidence below 0.45 = not relevant
+  if (signal.is_relevant && signal.confidence < 0.45) {
+    signal.is_relevant = false;
   }
 
-  // GATE 5: Markets expiring within 24 hours — no actionable window.
-  if (market.end_date) {
-    const hoursRemaining = (new Date(market.end_date).getTime() - Date.now()) / (1000 * 60 * 60);
-    if (hoursRemaining < 24) {
-      rejectionStats.expires_soon += 1;
-      console.log(`[Filter] REJECT expires_soon (${hoursRemaining.toFixed(1)}h): "${market.question.substring(0, 80)}"`);
-      return {
-        ...signal,
-        affected_stocks: validTickers,
-        is_relevant: false,
-        reason: 'Market expires within 24 hours — no actionable window for analyst positioning.',
-      };
-    }
+  if (signal.is_relevant && isPurePriceLevelMarket(market)) {
+    signal.is_relevant = false;
+    signal.reason =
+      "Pure price-level market with no underlying catalyst. Rejected to avoid treating price bets as BIT Capital research signals.";
   }
 
-  // GATE 6: Direct equity price-target ("Will NVDA hit (HIGH) $224?").
-  const q = market.question.toLowerCase();
-  const hasTickerInQ = /\([a-z]{1,5}\)|\b(aapl|amzn|googl|goog|meta|msft|nvda|amd|avgo|asml)\b/i.test(market.question);
-  const hasPriceLevel = /\$\d+/.test(market.question);
-  const hasPriceAction =
-    q.includes('hit (high)') || q.includes('hit (low)') ||
-    q.includes('close above') || q.includes('close below') ||
-    q.includes('hit $') || q.includes('finish week');
-  if (hasTickerInQ && hasPriceLevel && hasPriceAction) {
-    rejectionStats.price_target += 1;
-    console.log(`[Filter] REJECT price_target: "${market.question.substring(0, 80)}"`);
-    return {
-      ...signal,
-      affected_stocks: validTickers,
-      is_relevant: false,
-      reason: 'Direct stock price-target market — restates equity pricing rather than explaining an independent catalyst.',
-    };
+  const probability = market.probability ?? null;
+  if (
+    signal.is_relevant &&
+    probability !== null &&
+    (probability < 0.01 || probability > 0.99)
+  ) {
+    signal.is_relevant = false;
+    signal.reason =
+      "Resolved or near-resolved market. Rejected because probability is outside the 1%-99% actionable range.";
   }
 
-  // GATE 7: Thin volume — markets below $10K aren't credible signals.
-  // Real informed money doesn't trade thin markets, so price action
-  // there is more noise than signal.
   const volume = market.volume ?? 0;
-  if (volume < MIN_VOLUME_USD) {
-    rejectionStats.thin_volume += 1;
-    console.log(`[Filter] REJECT thin_volume ($${volume.toFixed(0)}): "${market.question.substring(0, 80)}"`);
-    return {
-      ...signal,
-      affected_stocks: validTickers,
-      is_relevant: false,
-      reason: `Volume $${(volume / 1000).toFixed(1)}K is below the $10K credibility threshold — market is too thin to reflect informed pricing.`,
-    };
+  if (signal.is_relevant && volume < MIN_RELEVANT_VOLUME_USD) {
+    signal.is_relevant = false;
+    signal.reason =
+      "Market volume is below $50. Rejected because liquidity is too thin for a reliable BIT Capital signal.";
   }
 
-  // GATE 8: Political election noise — state-level primaries and
-  // single-candidate races are too indirect to provide tech equity edge.
-  if (isElectionNoise(market.question)) {
-    rejectionStats.political_noise += 1;
-    console.log(`[Filter] REJECT political_noise: "${market.question.substring(0, 80)}"`);
-    return {
-      ...signal,
-      affected_stocks: validTickers,
-      is_relevant: false,
-      reason: 'State-level or single-candidate political race — too indirect to provide actionable read-through to BIT Capital holdings.',
-    };
+  if (signal.is_relevant && market.end_date) {
+    const hoursRemaining = (new Date(market.end_date).getTime() - Date.now()) / (1000 * 60 * 60);
+    if (hoursRemaining < 12) {
+      signal.is_relevant = false;
+      signal.reason =
+        "Market resolves in less than 12 hours. Rejected because the signal has no actionable monitoring window.";
+    }
   }
 
-  // GATE 9: Narrow-band exact-outcome bets — "Will X be between A and B"
-  // where the band is narrow. These bet on an exact landing zone, not
-  // a direction, and offer no informational edge over consensus.
-  if (isNarrowBandExactOutcome(market.question)) {
-    rejectionStats.narrow_band += 1;
-    console.log(`[Filter] REJECT narrow_band: "${market.question.substring(0, 80)}"`);
-    return {
-      ...signal,
-      affected_stocks: validTickers,
-      is_relevant: false,
-      reason: 'Narrow-band exact-outcome market — bets on a specific numerical landing zone rather than a direction; provides no analytical edge.',
-    };
+  // Rule 3: Clean ticker list to only valid holdings
+  signal.affected_stocks = uniqueValidTickers;
+
+  // Rule 4: Null out fields on rejected signals
+  if (!signal.is_relevant) {
+    signal.signal_type = signal.signal_type || null;
+    signal.signal_direction = null;
+    signal.urgency = null;
+    signal.is_ahead_of_curve = false;
   }
 
-  // GATE 2: Confidence floor (soft quality gate, applied last).
-  // Lowered from 0.55 → 0.45 because gpt-4o-mini anchors low for marginal cases.
-  if (confidence < 0.45) {
-    rejectionStats.low_confidence += 1;
-    console.log(`[Filter] REJECT low_confidence (${confidence}): "${market.question.substring(0, 80)}"`);
-    return { ...signal, affected_stocks: validTickers, is_relevant: false };
-  }
-
-  // ALL GATES PASSED → the CODE marks this relevant, regardless of
-  // what the LLM thought. Trust the structured extraction.
-  rejectionStats.passed += 1;
-  console.log(`[Filter] PASS: "${market.question.substring(0, 80)}" | ${validTickers.join(',')} | conf=${confidence}`);
-  return {
-    ...signal,
-    affected_stocks: validTickers,
-    is_relevant: true,
-  };
+  return signal;
 }
-
 function getMissingColumn(message: string) {
   return (
     message.match(/Could not find the '([^']+)' column/)?.[1] ??
@@ -695,6 +782,19 @@ function hasRecentProbabilityMove(market: MarketForAnalysis): boolean {
   return Math.abs(current - previous) >= MOVEMENT_THRESHOLD;
 }
 
+function hasActionableMarketShape(market: MarketForAnalysis): boolean {
+  const probability = market.probability ?? null;
+  if (probability !== null && (probability < 0.01 || probability > 0.99)) return false;
+  if ((market.volume ?? 0) < MIN_RELEVANT_VOLUME_USD) return false;
+
+  if (market.end_date) {
+    const hoursRemaining = (new Date(market.end_date).getTime() - Date.now()) / (1000 * 60 * 60);
+    if (hoursRemaining < 12) return false;
+  }
+
+  return true;
+}
+
 
 
 async function refreshExistingSignalMovement(limit: number) {
@@ -800,36 +900,39 @@ export async function getAnalysisCandidates(limit = 20) {
 async function fetchUnanalyzedMarkets(limit: number) {
   const supabase = getSupabaseClient();
   const config = await getAnalystConfig();
+  const desiredMarketRows = Math.max(limit * 4, 1000);
+  const pageSize = 1000;
 
   const freshMarketColumns =
     'id, question, description, probability, probability_24h_ago, volume, liquidity, category, end_date, last_updated_at';
   const fallbackMarketColumns =
     'id, question, description, probability, volume, liquidity, category, end_date';
 
-  // PRE-FILTER at the SQL layer: only fetch markets in the 15–85% informational
-  // edge window. Markets at extremes are guaranteed to fail HARD RULE 4 in
-  // enforceValidation, so spending an LLM call on them is pure waste.
-  let { data: markets, error: marketFetchError } = await supabase
-    .from('markets')
-    .select(freshMarketColumns)
-    .eq('is_active', true)
-    .gte('probability', 0.15)
-    .lte('probability', 0.85)
-    .order('volume', { ascending: false })
-    .limit(Math.max(limit * 25, 500));
+  async function fetchActiveMarketRows(columns: string) {
+    const rows: unknown[] = [];
+    for (let offset = 0; offset < desiredMarketRows; offset += pageSize) {
+      const { data, error } = await supabase
+        .from('markets')
+        .select(columns)
+        .eq('is_active', true)
+        .order('volume', { ascending: false })
+        .range(offset, Math.min(offset + pageSize - 1, desiredMarketRows - 1));
+
+      if (error) return { data: rows, error };
+      rows.push(...(data ?? []));
+      if (!data || data.length < pageSize) break;
+    }
+
+    return { data: rows, error: null };
+  }
+
+  let { data: markets, error: marketFetchError } = await fetchActiveMarketRows(freshMarketColumns);
 
   if (marketFetchError && getMissingColumn(marketFetchError.message)) {
     console.warn(
       '[Filter] markets freshness columns missing; falling back to legacy market selection'
     );
-    const fallback = await supabase
-      .from('markets')
-      .select(fallbackMarketColumns)
-      .eq('is_active', true)
-      .gte('probability', 0.15)
-      .lte('probability', 0.85)
-      .order('volume', { ascending: false })
-      .limit(Math.max(limit * 25, 500));
+    const fallback = await fetchActiveMarketRows(fallbackMarketColumns);
     markets = fallback.data as typeof markets;
     marketFetchError = fallback.error;
   }
@@ -837,27 +940,77 @@ async function fetchUnanalyzedMarkets(limit: number) {
   if (marketFetchError) throw new Error(`Supabase market fetch error: ${marketFetchError.message}`);
   if (!markets?.length) return [];
 
-  const marketsWithMovement = await enrichWithProbabilityChanges(markets as MarketForAnalysis[]);
+  const actionableMarkets = (markets as MarketForAnalysis[]).filter(hasActionableMarketShape);
+  console.log(
+    `[Filter] Quality prefilter kept ${actionableMarkets.length}/${markets.length} active markets`
+  );
+
+  const marketsWithMovement = await enrichWithProbabilityChanges(actionableMarkets);
   const ids = marketsWithMovement.map((market) => market.id);
-  const { data: existingSignals, error: signalFetchError } = await supabase
-    .from('signals')
-    .select('market_id')
-    .in('market_id', ids);
+
+  async function fetchExistingSignalRows(columns: string) {
+    const rows: unknown[] = [];
+    for (let i = 0; i < ids.length; i += 500) {
+      const { data, error } = await supabase
+        .from('signals')
+        .select(columns)
+        .in('market_id', ids.slice(i, i + 500));
+
+      if (error) return { data: rows, error };
+      rows.push(...(data ?? []));
+    }
+
+    return { data: rows, error: null };
+  }
+
+  let { data: existingSignals, error: signalFetchError } =
+    await fetchExistingSignalRows('market_id, model');
+
+  const modelColumnMissing = signalFetchError && getMissingColumn(signalFetchError.message) === 'model';
+  if (modelColumnMissing) {
+    console.warn('[Filter] signals.model is missing; treating existing analyses as stale for this run');
+    const fallback = await fetchExistingSignalRows('market_id');
+    existingSignals = fallback.data as typeof existingSignals;
+    signalFetchError = fallback.error;
+  }
 
   if (signalFetchError) throw new Error(`Supabase signal fetch error: ${signalFetchError.message}`);
 
-  const analyzedIds = new Set((existingSignals ?? []).map((signal) => signal.market_id));
-  const analysisCandidateMarkets = marketsWithMovement.filter(
-    (market) => !analyzedIds.has(market.id) || hasRecentProbabilityMove(market)
+  const signalByMarket = new Map(
+    ((existingSignals ?? []) as Array<{ market_id: string; model: string | null }>).map((signal) => [
+      signal.market_id,
+      signal,
+    ])
   );
+  const analysisCandidateMarkets = marketsWithMovement.filter(
+    (market) => {
+      const existingSignal = signalByMarket.get(market.id);
+      return (
+        !existingSignal ||
+        modelColumnMissing ||
+        existingSignal.model !== ANALYSIS_MODEL_TAG ||
+        hasRecentProbabilityMove(market)
+      );
+    }
+  );
+  const staleCount = analysisCandidateMarkets.filter((market) => {
+    const existingSignal = signalByMarket.get(market.id);
+    return existingSignal && (modelColumnMissing || existingSignal.model !== ANALYSIS_MODEL_TAG);
+  }).length;
   const changedCount = analysisCandidateMarkets.filter(
-    (market) => analyzedIds.has(market.id) && hasRecentProbabilityMove(market)
+    (market) => signalByMarket.has(market.id) && hasRecentProbabilityMove(market)
   ).length;
-    if (changedCount > 0) {
+
+  if (staleCount > 0) {
+    console.log(`[Filter] Re-analyzing ${staleCount} markets from older prompt/model versions`);
+  }
+  if (changedCount > 0) {
     console.log(`[Filter] Re-analyzing ${changedCount} markets with fresh probability moves`);
   }
 
-  return sortMarketsForAnalysis(analysisCandidateMarkets, config)
+  const prioritizedCandidates = sortMarketsForAnalysis(analysisCandidateMarkets, config);
+
+  return prioritizedCandidates
     .slice(0, limit)
     .map(({ market, priority }) => ({
       ...market,
@@ -871,42 +1024,47 @@ async function fetchUnanalyzedMarkets(limit: number) {
 
 async function analyzeBatch(markets: MarketForAnalysis[]): Promise<SignalRow[]> {
   if (markets.length === 0) return [];
-  
-  const enriched = await enrichWithProbabilityChanges(markets);
-  const userPrompt = JSON.stringify(
-    enriched.map((m) => ({
-      id: m.id,
-      question: m.question,
-      description: m.description,
-      probability: m.probability,
-    }))
-  );
 
-  console.log(`[Filter] Sending batch of ${markets.length} to gpt-4o-mini...`);
-  
-  const response = await callOpenAIJson<OpenAISignalResponse>([
-    { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: userPrompt }
-  ]);
+  const batch = await enrichWithProbabilityChanges(markets);
 
-  const parsedSignals = response.signals || [];
+  console.log(`[Filter] Sending batch of ${batch.length} to gpt-4o-mini...`);
+
+  const response = await openai.chat.completions.create({
+    model: ANALYSIS_MODEL,
+    temperature: 0.1,
+    response_format: { type: "json_object" },
+    max_tokens: 2000,
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: buildUserPrompt(batch) }
+    ]
+  });
+
+  const content = response.choices[0]?.message?.content;
+  if (!content) {
+    throw new Error('OpenAI returned an empty response.');
+  }
+
+  let parsedResponse: OpenAISignalResponse;
+  try {
+    parsedResponse = JSON.parse(content) as OpenAISignalResponse;
+  } catch {
+    throw new Error(`OpenAI returned invalid JSON: ${content.slice(0, 500)}`);
+  }
+
+  const parsedSignals = parsedResponse.signals || [];
   const analyzedAt = new Date().toISOString();
   const rows: SignalRow[] = [];
 
   for (let i = 0; i < parsedSignals.length; i++) {
-    const market = enriched[i];
+    const market = batch[i];
     if (!market) continue;
-    
-    // Inject market ID because the LLM might not return it reliably, but relies on order
-    let parsed = { ...parsedSignals[i], market_id: market.id };
 
-    // Apply hard validation gates AFTER the LLM — these are code-level overrides
-    // that the LLM cannot bypass, even if it marks the signal relevant.
-    parsed = enforceValidation(parsed, market);
+    const parsed = validateAndClean({ ...parsedSignals[i], market_id: market.id }, market);
 
     rows.push({
       ...parsed,
-      model: 'gpt-4o-mini',
+      model: ANALYSIS_MODEL_TAG,
       analyzed_at: analyzedAt,
       probability_change: market.probability_change,
       is_moving: market.is_moving,
@@ -916,11 +1074,38 @@ async function analyzeBatch(markets: MarketForAnalysis[]): Promise<SignalRow[]> 
   return rows;
 }
 
+async function analyzeBatchesWithConcurrency(
+  batches: MarketForAnalysis[][]
+): Promise<PromiseSettledResult<SignalRow[]>[]> {
+  const results: PromiseSettledResult<SignalRow[]>[] = [];
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < batches.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      try {
+        results[index] = {
+          status: 'fulfilled',
+          value: await analyzeBatch(batches[index]),
+        };
+      } catch (reason) {
+        results[index] = {
+          status: 'rejected',
+          reason,
+        };
+      }
+    }
+  }
+
+  const workerCount = Math.min(ANALYSIS_CONCURRENCY, batches.length);
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return results;
+}
+
 export async function analyzeMarkets(limit = 36): Promise<AnalyzeResult> {
   console.log(`[Filter] analyzeMarkets starting | limit: ${limit}`);
-  resetRejectionStats();
 
-  // Refresh old signal movement before fetching new ones
   await refreshExistingSignalMovement(limit);
 
   const unanalyzed = await fetchUnanalyzedMarkets(limit);
@@ -929,17 +1114,15 @@ export async function analyzeMarkets(limit = 36): Promise<AnalyzeResult> {
     return { analyzed: 0, relevant: 0 };
   }
 
-  // Run batches in PARALLEL. With 100 markets and BATCH_SIZE=10 we fire 10
-  // OpenAI calls at once instead of sequentially. gpt-4o-mini's rate limit
-  // (200 req/min, 200k tok/min) easily accommodates this, and total wall
-  // time drops from ~2-3 minutes to ~15 seconds.
   const batches: MarketForAnalysis[][] = [];
   for (let i = 0; i < unanalyzed.length; i += BATCH_SIZE) {
     batches.push(unanalyzed.slice(i, i + BATCH_SIZE));
   }
 
-  console.log(`[Filter] Dispatching ${batches.length} batches in parallel...`);
-  const batchResults = await Promise.allSettled(batches.map((batch) => analyzeBatch(batch)));
+  console.log(
+    `[Filter] Dispatching ${batches.length} OpenAI batches of up to ${BATCH_SIZE} markets with concurrency ${ANALYSIS_CONCURRENCY}...`
+  );
+  const batchResults = await analyzeBatchesWithConcurrency(batches);
 
   let analyzedCount = 0;
   let relevantCount = 0;
@@ -958,8 +1141,6 @@ export async function analyzeMarkets(limit = 36): Promise<AnalyzeResult> {
   if (allRows.length > 0) {
     await upsertSignalsWithSchemaFallback(allRows);
   }
-
-  logRejectionStats();
 
   return { analyzed: analyzedCount, relevant: relevantCount };
 }
