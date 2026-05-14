@@ -6,6 +6,13 @@ Built as a technical case study for the **AI Engineering Intern** position at [B
 
 ---
 
+## 📺 Live demo
+
+Watch a 3-minute walkthrough of the working app:
+**[Loom Demo](https://www.loom.com/share/bdc8cd2fe30b4c3388d72b74ef287517)**
+
+---
+
 ## What it does
 
 Polymarket hosts thousands of prediction markets every day — Fed decisions, tariffs, AI regulation, company milestones, sports, celebrity news, weather. **Most are noise.** A small fraction contain real signals for equity investors.
@@ -19,6 +26,28 @@ This scanner:
 5. **Surfaces** everything through a dark-mode dashboard built for finance professionals
 
 The goal: turn ~1,200 markets per pipeline run into a 5-minute morning read with the **3 signals an analyst should act on today**.
+
+---
+
+## Screenshots
+
+### Dashboard — Morning briefing at a glance
+
+![Dashboard with 39 relevant signals across 4,127 markets](./screenshots/dashboard.png)
+
+The Dashboard surfaces the day's top signals with affected BIT Capital tickers, direction (positive/negative), urgency level, and signal type. Each card is one click away from the source Polymarket market.
+
+### Signals Database — Queryable, filterable
+
+![Signals database with 33 filtered results showing confidence scores and ticker tags](./screenshots/signals-database.png)
+
+The full database of analyzed markets. Analysts can filter by urgency, signal type, direction, or Ahead of Curve flag. Each signal includes its LLM-generated reasoning, affected stocks, and a direct link back to the source market.
+
+### Morning Briefing — Analyst-grade output
+
+![BIT Capital morning briefing with Market Pulse, Top 3 Signals, and Portfolio Exposure Summary](./screenshots/morning-briefing.png)
+
+The auto-generated morning briefing, structured like a sell-side research note: Market Pulse, Top 3 Signals to Act On (with portfolio impact and conviction levels), Portfolio Exposure Summary, Contrarian Take, What to Watch Today, and Risk to This View. One-click PDF export.
 
 ---
 
