@@ -6,6 +6,7 @@ create table if not exists markets (
   question text not null,
   description text,
   probability double precision,
+  probability_24h_ago numeric,
   yes_price double precision,
   no_price double precision,
   volume double precision default 0,
@@ -15,7 +16,8 @@ create table if not exists markets (
   is_active boolean default true,
   raw jsonb,
   first_seen_at timestamptz default now(),
-  fetched_at timestamptz default now()
+  fetched_at timestamptz default now(),
+  last_updated_at timestamptz default now()
 );
 
 alter table markets add column if not exists slug text;
@@ -25,6 +27,8 @@ alter table markets add column if not exists no_price double precision;
 alter table markets add column if not exists liquidity double precision default 0;
 alter table markets add column if not exists raw jsonb;
 alter table markets add column if not exists first_seen_at timestamptz default now();
+alter table markets add column if not exists probability_24h_ago numeric;
+alter table markets add column if not exists last_updated_at timestamptz default now();
 -- Pre-computed Polymarket URL — built at ingest time so the frontend doesn't
 -- have to encode URL logic, and it survives if Polymarket changes their URL
 -- structure (we only update the ingest, not every consumer).

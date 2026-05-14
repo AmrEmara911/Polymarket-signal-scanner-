@@ -12,13 +12,13 @@ Polymarket hosts thousands of prediction markets every day — Fed decisions, ta
 
 This scanner:
 
-1. **Ingests** ~1,000 active prediction markets from Polymarket every 6 hours
+1. **Ingests** ~1,200 markets per pipeline run from Polymarket every 6 hours
 2. **Filters** them using an LLM grounded in BIT Capital's actual portfolio holdings (sourced from public 13F filings)
 3. **Classifies** relevant signals by urgency, direction, signal type, and thematic exposure
 4. **Generates** structured morning briefings styled as analyst notes
 5. **Surfaces** everything through a dark-mode dashboard built for finance professionals
 
-The goal: turn ~1,000 daily markets into a 5-minute morning read with the **3 signals an analyst should act on today**.
+The goal: turn ~1,200 markets per pipeline run into a 5-minute morning read with the **3 signals an analyst should act on today**.
 
 ---
 
@@ -157,7 +157,17 @@ A signal is only valuable if the market doesn't already know about it. The filte
 
 These get flagged as **"ahead of curve"** — the window where the prediction market is pricing something in but the equity market hasn't caught up yet.
 
-### 5. Reports are written like analyst notes, not chatbot summaries
+### 5. Ahead of Curve is computed in code, not by the LLM
+
+The `is_ahead_of_curve` flag was originally set by the LLM based on its reasoning. This caused two problems: the LLM often lacked access to the prior-probability data needed to compute the 15pp movement criterion, and its judgment of "contested" was inconsistent run-to-run. The flag is now computed deterministically in TypeScript after the LLM call:
+
+- `market.probability` must be between 0.25 and 0.75
+- `market.volume` must exceed $50,000
+- `abs(market.probability - market.probability_24h_ago)` must exceed 0.15
+
+This is a deliberate architecture choice: use the LLM for subjective relevance judgment, use code for objective criteria. The result is reproducible, auditable, and testable.
+
+### 6. Reports are written like analyst notes, not chatbot summaries
 
 The report generator uses a separate LLM call with a prompt that explicitly mimics a sell-side analyst tone: short paragraphs, named tickers, explicit direction, contrarian section at the end. Output is rendered as Markdown and exportable as PDF.
 
@@ -209,7 +219,7 @@ Open [http://localhost:3000](http://localhost:3000).
 
 Click **"Run Pipeline Now"** on the dashboard. Takes ~45–60 seconds:
 
-- Ingests ~1,000 markets from Polymarket
+- Ingests ~1,200 markets per pipeline run from Polymarket
 - Analyzes ~30–40 new markets with the LLM
 - Generates a fresh morning briefing
 
@@ -380,6 +390,7 @@ The prompt deliberately tells the LLM **not** to gatekeep. The relevance decisio
 
 Documented in detail in [PROJECT_LEARNINGS.md](./PROJECT_LEARNINGS.md). Short list:
 
+- **Multi-model voting (consensus filtering)** — run every market through 3 frontier LLMs (GPT-4o, Claude Sonnet 4.5, Gemini 2.5 Pro) in parallel, classify based on majority vote, surface disagreements as ambiguity flags. This is how production research desks handle LLM uncertainty.
 - **Cross-signal pattern detection** — connect related markets (e.g., "Fed cuts rates" + "Recession by 2027") into composite narratives
 - **Probability divergence vs. equity prices** — when Polymarket says 60% but the implied probability from stock prices says 30%, that's the real alpha
 - **Calibration tracking** — log every prediction and verify that "confidence: 0.85" actually means 85% accuracy over time
@@ -389,10 +400,10 @@ Documented in detail in [PROJECT_LEARNINGS.md](./PROJECT_LEARNINGS.md). Short li
 
 ## Submission notes
 
-- **Time invested:** ~7 days (compressed from the 2-week brief)
-- **Lines of code:** ~3,400 TypeScript across frontend, API, and pipeline
-- **API costs incurred during build:** ~$4 in OpenAI usage
-- **Live deployment:** runs locally with the steps above
+- **Markets per pipeline run:** ~1,200
+- **Pipeline runtime:** ~3–5 minutes
+- **Relevant signals per run:** 30–50
+- **Database stores:** ~4,000 historical markets
 
 ---
 

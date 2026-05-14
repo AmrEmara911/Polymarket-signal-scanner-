@@ -5,7 +5,7 @@ import { getSupabaseClient } from './supabase';
 
 const BATCH_SIZE = 5;
 const ANALYSIS_MODEL = "gpt-4o-mini";
-const ANALYSIS_PROMPT_VERSION = "filter-v4-coverage";
+const ANALYSIS_PROMPT_VERSION = "filter-v5-ahead-code";
 const ANALYSIS_MODEL_TAG = `${ANALYSIS_MODEL}:${ANALYSIS_PROMPT_VERSION}`;
 const ANALYSIS_CONCURRENCY = 12;
 const MIN_RELEVANT_VOLUME_USD = 50;
@@ -26,7 +26,7 @@ const TICKER_ALIASES: Record<string, string> = {
 const MOVEMENT_BASELINE_MIN_AGE_MS = 6 * 60 * 60 * 1000;
 const MOVEMENT_THRESHOLD = 0.05;
 
-/** Canonical BIT Capital thematic buckets — also referenced in the LLM prompt. */
+/** Canonical BIT Capital thematic buckets - also referenced in the LLM prompt. */
 export const THEMATIC_BUCKETS = [
   'AI Infrastructure',   // IREN, NVDA, AMD, APLD, COHR
   'Big Tech Platforms',  // MSFT, GOOGL, META, AAPL, AMZN
@@ -172,7 +172,7 @@ A signal is RELEVANT if it meets BOTH of these:
 1. You can name at least one specific ticker from the holdings
    list in affected_stocks. If you cannot, is_relevant=false.
 2. The market outcome would plausibly move that ticker's price,
-   sentiment, or competitive position — even indirectly. Be
+   sentiment, or competitive position - even indirectly. Be
    GENEROUS here: macro signals, regulatory signals, competitor
    movements, supply chain events, geopolitical events affecting
    tech supply chains, AI model rankings, IPO announcements, and
@@ -193,14 +193,16 @@ When in doubt between relevant and not relevant, choose RELEVANT
 with a moderate confidence score (0.55-0.70). Better to surface
 a borderline signal than miss a real one.
 
-SIGNAL DIRECTION RULES (critical — get these right):
+Do not set is_ahead_of_curve. This field is computed deterministically by code after your response.
+
+SIGNAL DIRECTION RULES (critical - get these right):
 - If a competitor (ByteDance, Mistral, Meta AI) beats MSFT/GOOGL
-  at AI → signal_direction = "negative" for MSFT/GOOGL
-- If regulation passes that restricts tech → "negative"
-- If Fed cuts rates → "positive" for growth tech
-- If Fed hikes rates → "negative" for growth tech
-- If OpenAI IPO succeeds → "positive" for MSFT (they hold equity)
-- If AI safety bill passes → "negative" for AI infrastructure
+  at AI -> signal_direction = "negative" for MSFT/GOOGL
+- If regulation passes that restricts tech -> "negative"
+- If Fed cuts rates -> "positive" for growth tech
+- If Fed hikes rates -> "negative" for growth tech
+- If OpenAI IPO succeeds -> "positive" for MSFT (they hold equity)
+- If AI safety bill passes -> "negative" for AI infrastructure
 
 FEW-SHOT EXAMPLES:
 
@@ -217,8 +219,7 @@ Output: {
   "signal_type": "macro",
   "signal_direction": "positive",
   "urgency": "high",
-  "thematic_buckets": ["Macro/Rates", "Big Tech Platforms"],
-  "is_ahead_of_curve": false
+  "thematic_buckets": ["Macro/Rates", "Big Tech Platforms"]
 }
 
 Input: "Will EU AI Act enforcement begin before June 2026?"
@@ -234,8 +235,7 @@ Output: {
   "signal_type": "regulation",
   "signal_direction": "negative",
   "urgency": "medium",
-  "thematic_buckets": ["AI Regulation", "Big Tech Platforms"],
-  "is_ahead_of_curve": true
+  "thematic_buckets": ["AI Regulation", "Big Tech Platforms"]
 }
 
 Input: "Will inflation reach more than 5% in 2026?"
@@ -251,8 +251,7 @@ Output: {
   "signal_type": "macro",
   "signal_direction": "negative",
   "urgency": "high",
-  "thematic_buckets": ["Macro/Rates"],
-  "is_ahead_of_curve": false
+  "thematic_buckets": ["Macro/Rates"]
 }
 
 Input: "Will Gemini 3.5 be released by July 31?"
@@ -267,8 +266,7 @@ Output: {
   "signal_type": "company",
   "signal_direction": "positive",
   "urgency": "high",
-  "thematic_buckets": ["AI Infrastructure", "Big Tech Platforms"],
-  "is_ahead_of_curve": false
+  "thematic_buckets": ["AI Infrastructure", "Big Tech Platforms"]
 }
 
 Input: "Will ByteDance have the #1 AI model by December 2026?"
@@ -283,8 +281,7 @@ Output: {
   "signal_type": "company",
   "signal_direction": "negative",
   "urgency": "medium",
-  "thematic_buckets": ["AI Infrastructure"],
-  "is_ahead_of_curve": false
+  "thematic_buckets": ["AI Infrastructure"]
 }
 
 Input: "Will Bitcoin be above $88,000 on May 12?"
@@ -298,8 +295,7 @@ Output: {
   "signal_type": null,
   "signal_direction": null,
   "urgency": null,
-  "thematic_buckets": [],
-  "is_ahead_of_curve": false
+  "thematic_buckets": []
 }
 
 Input: "Will SpaceX IPO above $1.4T?"
@@ -313,8 +309,7 @@ Output: {
   "signal_type": null,
   "signal_direction": null,
   "urgency": null,
-  "thematic_buckets": [],
-  "is_ahead_of_curve": false
+  "thematic_buckets": []
 }
 
 Input: "Will Abdul El-Sayed win the Michigan Democratic Primary?"
@@ -329,8 +324,7 @@ Output: {
   "signal_type": null,
   "signal_direction": null,
   "urgency": null,
-  "thematic_buckets": [],
-  "is_ahead_of_curve": false
+  "thematic_buckets": []
 }
 
 Input: "Will Apple market cap exceed Microsoft by Dec 2026?"
@@ -346,8 +340,7 @@ Output: {
   "signal_type": "company",
   "signal_direction": "neutral",
   "urgency": "medium",
-  "thematic_buckets": ["Big Tech Platforms"],
-  "is_ahead_of_curve": false
+  "thematic_buckets": ["Big Tech Platforms"]
 }
 
 Input: "Will US impose 25% tariffs on Chinese semiconductors?"
@@ -356,14 +349,13 @@ Output: {
   "is_relevant": true,
   "confidence": 0.78,
   "reason": "Direct supply chain and cost impact for NVDA, AMD,
-    AAPL, and TSM. Major catalyst with bipartisan support —
+    AAPL, and TSM. Major catalyst with bipartisan support -
     market is split, making this a genuine ahead-of-curve signal.",
   "affected_stocks": ["NVDA", "AMD", "AAPL", "TSM"],
   "signal_type": "regulation",
   "signal_direction": "negative",
   "urgency": "high",
-  "thematic_buckets": ["Semiconductors", "Geopolitics"],
-  "is_ahead_of_curve": true
+  "thematic_buckets": ["Semiconductors", "Geopolitics"]
 }
 
 Input: "Will Q3 2026 GDP growth exceed 2.5%?"
@@ -379,8 +371,7 @@ Output: {
   "signal_type": "macro",
   "signal_direction": "negative",
   "urgency": "medium",
-  "thematic_buckets": ["Macro/Rates"],
-  "is_ahead_of_curve": false
+  "thematic_buckets": ["Macro/Rates"]
 }
 
 Input: "Will the US further restrict Nvidia chip exports to China before Q4 2026?"
@@ -393,8 +384,7 @@ Output: {
   "signal_type": "regulation",
   "signal_direction": "negative",
   "urgency": "high",
-  "thematic_buckets": ["AI Infrastructure", "Semiconductors", "Geopolitics"],
-  "is_ahead_of_curve": true
+  "thematic_buckets": ["AI Infrastructure", "Semiconductors", "Geopolitics"]
 }
 
 Input: "Will DOJ win its Google adtech antitrust case before 2027?"
@@ -407,8 +397,7 @@ Output: {
   "signal_type": "regulation",
   "signal_direction": "negative",
   "urgency": "high",
-  "thematic_buckets": ["Big Tech Platforms", "AI Regulation"],
-  "is_ahead_of_curve": true
+  "thematic_buckets": ["Big Tech Platforms", "AI Regulation"]
 }
 
 Input: "Will OpenAI release GPT-5 before December 2026?"
@@ -421,8 +410,7 @@ Output: {
   "signal_type": "company",
   "signal_direction": "positive",
   "urgency": "medium",
-  "thematic_buckets": ["AI Infrastructure", "Big Tech Platforms"],
-  "is_ahead_of_curve": false
+  "thematic_buckets": ["AI Infrastructure", "Big Tech Platforms"]
 }
 
 Input: "Will a US stablecoin bill pass before September 2026?"
@@ -435,8 +423,7 @@ Output: {
   "signal_type": "regulation",
   "signal_direction": "positive",
   "urgency": "high",
-  "thematic_buckets": ["Fintech", "Digital Assets"],
-  "is_ahead_of_curve": true
+  "thematic_buckets": ["Fintech", "Digital Assets"]
 }
 
 Input: "Will Texas pass new data center power restrictions before 2027?"
@@ -449,8 +436,7 @@ Output: {
   "signal_type": "regulation",
   "signal_direction": "negative",
   "urgency": "medium",
-  "thematic_buckets": ["AI Infrastructure"],
-  "is_ahead_of_curve": true
+  "thematic_buckets": ["AI Infrastructure"]
 }
 
 Input: "Will Reddit announce a major AI data licensing deal before 2027?"
@@ -463,8 +449,7 @@ Output: {
   "signal_type": "company",
   "signal_direction": "positive",
   "urgency": "medium",
-  "thematic_buckets": ["Big Tech Platforms", "AI Infrastructure"],
-  "is_ahead_of_curve": false
+  "thematic_buckets": ["Big Tech Platforms", "AI Infrastructure"]
 }
 
 Input: "Will Nvidia hit (HIGH) $224 this week?"
@@ -477,8 +462,7 @@ Output: {
   "signal_type": null,
   "signal_direction": null,
   "urgency": null,
-  "thematic_buckets": [],
-  "is_ahead_of_curve": false
+  "thematic_buckets": []
 }
 
 Input: "Will WTI Crude Oil hit (HIGH) $130 in May?"
@@ -491,8 +475,7 @@ Output: {
   "signal_type": null,
   "signal_direction": null,
   "urgency": null,
-  "thematic_buckets": [],
-  "is_ahead_of_curve": false
+  "thematic_buckets": []
 }
 
 Return a JSON object:
@@ -600,6 +583,28 @@ function validateAndClean(signal: any, market: MarketForAnalysis): any {
 
   return signal;
 }
+
+function computeAheadOfCurve(signal: any, market: any): boolean {
+  // All three criteria must be true
+  if (!market) return false;
+
+  // Criterion 1: probability in contested zone
+  const prob = market.probability;
+  if (prob === null || prob < 0.25 || prob > 0.75) return false;
+
+  // Criterion 2: volume above $50,000
+  const volume = market.volume || 0;
+  if (volume < 50000) return false;
+
+  // Criterion 3: probability moved more than 15pp in 24h
+  const prior = market.probability_24h_ago;
+  if (prior === null || prior === undefined) return false;
+
+  const movement = Math.abs(prob - prior);
+  if (movement < 0.15) return false;
+
+  return true;
+}
 function getMissingColumn(message: string) {
   return (
     message.match(/Could not find the '([^']+)' column/)?.[1] ??
@@ -624,15 +629,18 @@ async function saveSignalsWithoutUniqueConstraint(rows: MutableSignalRow[]) {
   const supabase = getSupabaseClient();
 
   for (const row of rows) {
-    const { data: existing, error: lookupError } = await supabase
+    const { data: existingRows, error: lookupError } = await supabase
       .from('signals')
       .select('id')
       .eq('market_id', row.market_id)
-      .maybeSingle();
+      .order('analyzed_at', { ascending: false })
+      .limit(1);
 
     if (lookupError) {
       throw new Error(`Supabase signal lookup error: ${lookupError.message}`);
     }
+
+    const existing = existingRows?.[0];
 
     if (existing?.id) {
       const { error: updateError } = await supabase
@@ -1061,6 +1069,7 @@ async function analyzeBatch(markets: MarketForAnalysis[]): Promise<SignalRow[]> 
     if (!market) continue;
 
     const parsed = validateAndClean({ ...parsedSignals[i], market_id: market.id }, market);
+    parsed.is_ahead_of_curve = parsed.is_relevant ? computeAheadOfCurve(parsed, market) : false;
 
     rows.push({
       ...parsed,

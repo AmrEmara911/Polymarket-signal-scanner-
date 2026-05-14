@@ -13,32 +13,6 @@ const SECTORS_LIST = [
   "Macro & Rates"
 ];
 
-type Sensitivity = 'strict' | 'balanced' | 'broad';
-
-const SENSITIVITY_OPTIONS: { value: Sensitivity; label: string; description: string; expected: string }[] = [
-  {
-    value: 'strict',
-    label: 'Strict',
-    description: 'Only direct company events for confirmed BIT Capital holdings. High conviction only.',
-    expected: '5–15 signals per scan',
-  },
-  {
-    value: 'balanced',
-    label: 'Balanced',
-    description: 'Company events + macro signals + regulatory events affecting portfolio sectors.',
-    expected: '15–30 signals per scan',
-  },
-  {
-    value: 'broad',
-    label: 'Broad',
-    description: 'Everything that could plausibly affect tech equities. Includes adjacent sectors and speculative connections.',
-    expected: '30–60 signals per scan',
-  },
-];
-
-const SENSITIVITY_INDEX: Record<Sensitivity, number> = { strict: 0, balanced: 1, broad: 2 };
-const INDEX_SENSITIVITY: Sensitivity[] = ['strict', 'balanced', 'broad'];
-
 const INTERVAL_OPTIONS = [
   { value: 1,  label: 'Every 1 hour' },
   { value: 3,  label: 'Every 3 hours' },
@@ -69,7 +43,6 @@ export default function SettingsPage() {
   const [sectors, setSectors] = useState<Record<string, boolean>>(
     SECTORS_LIST.reduce((acc, curr) => ({ ...acc, [curr]: true }), {})
   );
-  const [sensitivity, setSensitivity] = useState<Sensitivity>('balanced');
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -83,13 +56,6 @@ export default function SettingsPage() {
   useEffect(() => {
     const savedStocks = localStorage.getItem('bitcap_watched_stocks');
     if (savedStocks) setStocks(savedStocks);
-
-    // Load sensitivity from localStorage (DB is source of truth for analyze route;
-    // localStorage keeps the UI in sync until the next explicit Save)
-    const savedSensitivity = localStorage.getItem('filter_sensitivity') as Sensitivity | null;
-    if (savedSensitivity && INDEX_SENSITIVITY.includes(savedSensitivity)) {
-      setSensitivity(savedSensitivity);
-    }
 
     const savedSectorsStr = localStorage.getItem('bitcap_watched_sectors');
     if (savedSectorsStr) {
@@ -122,24 +88,9 @@ export default function SettingsPage() {
     setSectors(prev => ({ ...prev, [sector]: !prev[sector] }));
   };
 
-  // Slider change — updates local state only; backend write happens on Save
-  const handleSensitivityChange = (value: Sensitivity) => {
-    setSensitivity(value);
-    localStorage.setItem('filter_sensitivity', value);
-  };
-
   const handleSave = async () => {
     setSaveError(null);
     try {
-      // Persist sensitivity to DB so the analyze route picks it up
-      const res = await fetch('/api/scheduler/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: 'filter_sensitivity', value: sensitivity }),
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error ?? 'Failed to save sensitivity');
-
       // Persist watched stocks / sectors to localStorage
       localStorage.setItem('bitcap_watched_stocks', stocks);
       localStorage.setItem('bitcap_watched_sectors', JSON.stringify(sectors));
@@ -239,7 +190,7 @@ export default function SettingsPage() {
         {saved && (
           <div className="flex items-center gap-2 text-[#10b981]">
             <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
-            <span className="text-sm font-medium">Configuration saved. Applied on next pipeline run.</span>
+            <span className="text-sm font-medium">Configuration saved.</span>
           </div>
         )}
         {saveError && (
@@ -247,78 +198,7 @@ export default function SettingsPage() {
         )}
       </div>
 
-      {/* Section 3 — Filter Sensitivity */}
-      <div className="bg-[#111827] border border-[#1f2937] rounded-xl shadow-sm p-6 space-y-6">
-        <div>
-          <h3 className="text-lg font-semibold text-white mb-1">Filter Sensitivity</h3>
-          <p className="text-sm text-[#9ca3af]">Controls how aggressively the LLM filters prediction markets. Applied on the next pipeline run.</p>
-        </div>
-
-        {/* Slider */}
-        <div className="space-y-4">
-          <div className="relative pt-1">
-            {/* Track labels */}
-            <div className="flex justify-between mb-3">
-              {SENSITIVITY_OPTIONS.map((opt, i) => (
-                <button
-                  key={opt.value}
-                  onClick={() => handleSensitivityChange(opt.value)}
-                  className={`text-sm font-semibold transition-colors ${
-                    sensitivity === opt.value ? 'text-[#3b82f6]' : 'text-[#6b7280] hover:text-[#9ca3af]'
-                  }`}
-                  style={{ width: '33%', textAlign: i === 0 ? 'left' : i === 2 ? 'right' : 'center' }}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
-
-            {/* Range input */}
-            <div className="relative">
-              <input
-                type="range"
-                min={0}
-                max={2}
-                step={1}
-                value={SENSITIVITY_INDEX[sensitivity]}
-                onChange={(e) => handleSensitivityChange(INDEX_SENSITIVITY[Number(e.target.value)])}
-                className="w-full h-2 rounded-full appearance-none cursor-pointer"
-                style={{
-                  background: `linear-gradient(to right, #3b82f6 0%, #3b82f6 ${SENSITIVITY_INDEX[sensitivity] * 50}%, #1f2937 ${SENSITIVITY_INDEX[sensitivity] * 50}%, #1f2937 100%)`,
-                  accentColor: '#3b82f6',
-                }}
-              />
-              {/* Tick marks */}
-              <div className="flex justify-between px-0.5 mt-1">
-                {[0, 1, 2].map((i) => (
-                  <div
-                    key={i}
-                    className={`w-1 h-1 rounded-full ${SENSITIVITY_INDEX[sensitivity] >= i ? 'bg-[#3b82f6]' : 'bg-[#374151]'}`}
-                  />
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Active mode description */}
-          <div className="bg-[#0a0f1e] border border-[#1f2937] rounded-lg p-4 space-y-1">
-            {SENSITIVITY_OPTIONS.filter(opt => opt.value === sensitivity).map(opt => (
-              <div key={opt.value}>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-sm font-semibold text-white">{opt.label} mode</span>
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-[#3b82f6]/20 text-[#3b82f6] font-medium">
-                    {opt.expected}
-                  </span>
-                  <span className="text-xs text-[#6b7280] ml-auto">Saved on next ↓</span>
-                </div>
-                <p className="text-sm text-[#9ca3af]">{opt.description}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Section 4 — Pipeline Schedule */}
+      {/* Section 3 — Pipeline Schedule */}
       <div className="bg-[#111827] border border-[#1f2937] rounded-xl shadow-sm p-6 space-y-6">
         <div>
           <h3 className="text-lg font-semibold text-white mb-1">Pipeline Schedule</h3>

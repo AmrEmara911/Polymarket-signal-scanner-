@@ -35,7 +35,7 @@ export async function POST(req: NextRequest) {
     const supabase = getSupabaseClient();
     const now = new Date().toISOString();
 
-    // Generic key/value upsert — used for arbitrary config (e.g. filter_sensitivity)
+    // Generic key/value upsert — used for arbitrary config
     if (typeof body.key === 'string' && body.value !== undefined) {
       await supabase
         .from('config')

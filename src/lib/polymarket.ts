@@ -32,6 +32,7 @@ export interface Market {
   question: string;
   description: string | null;
   probability: number;
+  probability_24h_ago: number | null;
   yes_price: number;
   no_price: number | null;
   volume: number;
@@ -41,6 +42,7 @@ export interface Market {
   is_active: boolean;
   market_url: string;
   fetched_at: string;
+  last_updated_at: string;
   raw: PolymarketAPIMarket;
 }
 
@@ -74,10 +76,9 @@ export function buildPolymarketUrl(market: MarketUrlInput): string {
     return `https://polymarket.com/event/${eventSlug.trim()}`;
   }
 
-  // 2. Market's own slug as event slug (legacy, may 404 but worth trying
-  //    when the events array isn't available — e.g. building from a DB row)
+  // 2. Market's own slug as market slug (the correct path for individual markets)
   if (market.slug && market.slug.trim()) {
-    return `https://polymarket.com/event/${market.slug.trim()}`;
+    return `https://polymarket.com/market/${market.slug.trim()}`;
   }
 
   // 3. Search by question text — the always-works fallback
@@ -141,6 +142,7 @@ async function fetchPolymarketMarkets(params: Record<string, string | number | b
   }
 
   const res = await fetch(`https://gamma-api.polymarket.com/markets?${searchParams.toString()}`, {
+    cache: 'no-store',
     next: { revalidate: 0 },
   });
 
@@ -151,10 +153,129 @@ async function fetchPolymarketMarkets(params: Record<string, string | number | b
   return (await res.json()) as PolymarketAPIMarket[];
 }
 
+function getMissingColumn(message: string) {
+  return (
+    message.match(/Could not find the '([^']+)' column/)?.[1] ??
+    message.match(/column \w+\.([a-zA-Z0-9_]+) does not exist/)?.[1] ??
+    null
+  );
+}
+
+function removeColumnFromMarkets(markets: Array<Record<string, unknown>>, column: string) {
+  return markets.map((market) => {
+    const nextMarket = { ...market };
+    delete nextMarket[column];
+    return nextMarket;
+  });
+}
+
+async function fetchExistingProbabilities(
+  supabase: ReturnType<typeof getSupabaseClient>,
+  ids: string[]
+) {
+  const previousById = new Map<string, number>();
+  const chunkSize = 500;
+
+  for (let index = 0; index < ids.length; index += chunkSize) {
+    const chunk = ids.slice(index, index + chunkSize);
+    const { data, error } = await supabase
+      .from('markets')
+      .select('id, probability')
+      .in('id', chunk);
+
+    if (error) {
+      console.warn('[Ingest] Could not read previous market probabilities:', error.message);
+      return previousById;
+    }
+
+    for (const row of data ?? []) {
+      const probability = Number(row.probability);
+      if (Number.isFinite(probability)) {
+        previousById.set(row.id, probability);
+      }
+    }
+  }
+
+  return previousById;
+}
+
+async function upsertMarketsWithSchemaFallback(markets: Market[]) {
+  const supabase = getSupabaseClient();
+  let mutableMarkets = markets.map((market) => ({ ...market })) as Array<Record<string, unknown>>;
+  const removedColumns: string[] = [];
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    let errorOccurred = false;
+    let lastError: any = null;
+
+    // Chunk the upsert to avoid statement timeouts for large payloads
+    const CHUNK_SIZE = 250;
+    for (let i = 0; i < mutableMarkets.length; i += CHUNK_SIZE) {
+      const chunk = mutableMarkets.slice(i, i + CHUNK_SIZE);
+      const { error } = await supabase.from('markets').upsert(chunk, {
+        onConflict: 'id',
+      });
+
+      if (error) {
+        errorOccurred = true;
+        lastError = error;
+        break; // Stop processing chunks if we hit a schema error, so we can fallback and retry the whole set
+      }
+    }
+
+    if (!errorOccurred) {
+      if (removedColumns.length > 0) {
+        console.warn('[Ingest] Markets upsert skipped missing columns:', removedColumns.join(', '));
+      }
+      return;
+    }
+
+    const missingColumn = getMissingColumn(lastError?.message || '');
+    if (!missingColumn) {
+      throw new Error(`Supabase upsert error: ${lastError?.message}`);
+    }
+
+    removedColumns.push(missingColumn);
+    mutableMarkets = removeColumnFromMarkets(mutableMarkets, missingColumn);
+  }
+
+  throw new Error(
+    `Supabase upsert error: schema fallback removed too many columns (${removedColumns.join(
+      ', '
+    )})`
+  );
+}
+
 export async function fetchAndStoreMarkets(limit = 250): Promise<number> {
   const supabase = getSupabaseClient();
   const rawById = new Map<string, PolymarketAPIMarket>();
   const pageSize = Math.min(limit, 250);
+
+  // 1. Fetch active signals from DB to ensure their prices stay fresh
+  const { data: existingSignals } = await supabase.from('signals').select('market_id');
+  if (existingSignals && existingSignals.length > 0) {
+    const ids = existingSignals.map((s) => s.market_id).filter(Boolean);
+    console.log(`[Ingest] Refreshing ${ids.length} existing signals`);
+    
+    // Fetch individually (in chunks of 50 to avoid hammering API)
+    const chunkSize = 50;
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const chunk = ids.slice(i, i + chunkSize);
+      const results = await Promise.allSettled(
+        chunk.map((id) =>
+          fetch(`https://gamma-api.polymarket.com/markets/${id}`)
+            .then((r) => r.json())
+            .catch(() => null)
+        )
+      );
+      
+      for (const result of results) {
+        if (result.status === 'fulfilled' && result.value && result.value.id) {
+          rawById.set(result.value.id, result.value as PolymarketAPIMarket);
+        }
+      }
+    }
+  }
 
   const volumePages = await Promise.all(
     [0, pageSize, pageSize * 2].map((offset) =>
@@ -191,11 +312,13 @@ export async function fetchAndStoreMarkets(limit = 250): Promise<number> {
     }
   }
 
+  const previousProbabilities = await fetchExistingProbabilities(supabase, Array.from(rawById.keys()));
   const fetchedAt = new Date().toISOString();
   const markets: Market[] = Array.from(rawById.values())
     .filter((market) => market.id && market.question)
     .map((market) => {
       const yesPrice = getYesPrice(market);
+      const previousProbability = previousProbabilities.get(market.id) ?? null;
 
       const slug = market.slug ?? null;
       return {
@@ -204,6 +327,7 @@ export async function fetchAndStoreMarkets(limit = 250): Promise<number> {
         question: market.question,
         description: market.description ?? null,
         probability: yesPrice,
+        probability_24h_ago: previousProbability,
         yes_price: yesPrice,
         no_price: yesPrice ? 1 - yesPrice : null,
         volume: Number.parseFloat(market.volume ?? '0') || 0,
@@ -215,17 +339,12 @@ export async function fetchAndStoreMarkets(limit = 250): Promise<number> {
         // parent event slug (the only slug that yields a working URL).
         market_url: buildPolymarketUrl(market),
         fetched_at: fetchedAt,
+        last_updated_at: fetchedAt,
         raw: market,
       };
     });
 
-  const { error } = await supabase.from('markets').upsert(markets, {
-    onConflict: 'id',
-  });
-
-  if (error) {
-    throw new Error(`Supabase upsert error: ${error.message}`);
-  }
+  await upsertMarketsWithSchemaFallback(markets);
 
   // Record a probability snapshot for every market
   const recordedAt = new Date().toISOString();
@@ -235,16 +354,24 @@ export async function fetchAndStoreMarkets(limit = 250): Promise<number> {
     recorded_at: recordedAt,
   }));
 
-  const { error: snapError, count: snapshotInsertCount } = await supabase
-    .from('probability_snapshots')
-    .insert(snapshots, { count: 'exact' });
+  let snapshotInsertCount = 0;
+  const SNAPSHOT_CHUNK_SIZE = 500;
+  
+  for (let i = 0; i < snapshots.length; i += SNAPSHOT_CHUNK_SIZE) {
+    const chunk = snapshots.slice(i, i + SNAPSHOT_CHUNK_SIZE);
+    const { error: snapError, count } = await supabase
+      .from('probability_snapshots')
+      .insert(chunk, { count: 'exact' });
 
-  if (snapError) {
-    console.error('[Snapshots] Failed to record probability snapshots:', snapError.message);
-    throw new Error(`Supabase snapshot insert error: ${snapError.message}`);
+    if (snapError) {
+      console.error('[Snapshots] Failed to record probability snapshots:', snapError.message);
+      throw new Error(`Supabase snapshot insert error: ${snapError.message}`);
+    }
+    
+    if (count) snapshotInsertCount += count;
   }
 
-  console.log(`[Snapshots] ${snapshotInsertCount ?? snapshots.length} new snapshots recorded`);
+  console.log(`[Snapshots] ${snapshotInsertCount} new snapshots recorded`);
 
   return markets.length;
 }

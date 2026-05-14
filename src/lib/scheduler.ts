@@ -27,22 +27,21 @@ async function runPipeline() {
   const base = getBaseUrl();
 
   try {
-    // All three routes accept POST; use it consistently to avoid 405s on
-    // routes that may not export GET.
-    const ingestRes = await fetch(`${base}/api/ingest`, { method: 'POST' });
-    const ingestData = await ingestRes.json();
-    console.log('[Scheduler] Ingested:', ingestData.count, 'markets');
-
-    const analyzeRes = await fetch(`${base}/api/analyze`, { method: 'POST' });
-    const analyzeData = await analyzeRes.json();
-    console.log('[Scheduler] Analyzed:', analyzeData.analyzed, 'markets,', analyzeData.relevant, 'relevant');
-
-    if (analyzeData.relevant > 0) {
-      // /api/report only exports POST — using GET here was silently 405-ing
-      const reportRes = await fetch(`${base}/api/report`, { method: 'POST' });
-      const reportData = await reportRes.json();
-      console.log('[Scheduler] Report generated:', reportData.report?.id ?? '(no id)');
+    const pipelineRes = await fetch(`${base}/api/pipeline`, { method: 'POST', cache: 'no-store' });
+    const pipelineData = await pipelineRes.json();
+    if (!pipelineData.success) {
+      throw new Error(pipelineData.error ?? 'Pipeline failed');
     }
+    console.log(
+      '[Scheduler] Pipeline complete:',
+      pipelineData.markets_ingested,
+      'ingested,',
+      pipelineData.markets_analyzed,
+      'analyzed,',
+      pipelineData.relevant_signals,
+      'relevant, report:',
+      pipelineData.report_id ?? '(none)'
+    );
   } catch (error) {
     console.error('[Scheduler] Pipeline error:', error);
   }

@@ -20,6 +20,8 @@ interface MarketRow {
   liquidity?: number | null;
   category?: string | null;
   end_date?: string | null;
+  fetched_at?: string | null;
+  last_updated_at?: string | null;
 }
 
 function sortSignals(a: SignalRow, b: SignalRow) {
@@ -49,10 +51,19 @@ export async function GET() {
     const marketMap = new Map<string, MarketRow>();
 
     if (marketIds.length > 0) {
-      const { data: markets, error: marketError } = await supabase
+      let { data: markets, error: marketError } = await supabase
         .from('markets')
-        .select('id, question, probability, volume, liquidity, category, end_date')
+        .select('id, question, probability, volume, liquidity, category, end_date, fetched_at, last_updated_at')
         .in('id', marketIds);
+
+      if (marketError?.message.includes('last_updated_at')) {
+        const fallback = await supabase
+          .from('markets')
+          .select('id, question, probability, volume, liquidity, category, end_date, fetched_at')
+          .in('id', marketIds);
+        markets = fallback.data as typeof markets;
+        marketError = fallback.error;
+      }
 
       if (marketError) throw new Error(marketError.message);
 

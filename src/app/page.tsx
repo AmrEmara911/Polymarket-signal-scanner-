@@ -1,11 +1,13 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 import { DirectionBadge } from '@/components/DirectionBadge';
 import { ProbChangeBadge } from '@/components/ProbChangeBadge';
 import { MarketLinkIcon, resolveMarketUrl } from '@/components/MarketLink';
 import { AheadOfCurveBadge } from '@/components/AheadOfCurveBadge';
+import { AheadOfCurveTooltipContent, Delta24HTooltipContent, SignalTooltip } from '@/components/SignalTooltip';
 import { formatRelativeTime, formatFullTimestamp } from '@/lib/format-time';
 
 const THEMATIC_BUCKETS = [
@@ -76,10 +78,13 @@ type MarketInfo = {
   id?: string;
   question: string;
   probability: number;
+  probability_24h_ago?: number | string | null;
   volume: number;
   end_date?: string | null;
   slug?: string | null;
   market_url?: string | null;
+  fetched_at?: string | null;
+  last_updated_at?: string | null;
 };
 
 type SignalRow = {
@@ -108,9 +113,39 @@ const PIPELINE_STEP_ESTIMATES: Record<Extract<PipelineStatus, 'ingesting' | 'ana
   analyzing: 30,
   reporting: 10,
 };
-
 function getSignalMarket(signal: SignalRow): MarketInfo | null {
   return Array.isArray(signal.markets) ? signal.markets[0] ?? null : signal.markets;
+}
+
+function getMarketFreshnessAt(market: MarketInfo | null): string | null {
+  return market?.last_updated_at ?? market?.fetched_at ?? null;
+}
+
+function MarketFreshness({ market }: { market: MarketInfo | null }) {
+  const timestamp = getMarketFreshnessAt(market);
+  if (!timestamp) return null;
+
+  return (
+    <span title={formatFullTimestamp(timestamp)} className="text-xs text-[#6b7280] whitespace-nowrap">
+      as of {formatRelativeTime(timestamp)}
+    </span>
+  );
+}
+
+function isMissingFreshnessColumn(error: { message?: string } | null) {
+  return Boolean(error?.message?.includes('last_updated_at'));
+}
+
+function getAheadOfCurveMovement(signal: SignalRow): number {
+  const market = getSignalMarket(signal);
+  const probability = Number(market?.probability);
+  const prior = Number(market?.probability_24h_ago);
+
+  if (Number.isFinite(probability) && Number.isFinite(prior)) {
+    return Math.abs(probability - prior);
+  }
+
+  return Math.abs(signal.probability_change ?? 0);
 }
 
 function hasExpired(endDate: string | null | undefined, now = Date.now()): boolean {
@@ -150,6 +185,22 @@ function formatVolume(volume: number): string {
   if (volume >= 1_000_000) return `$${(volume / 1_000_000).toFixed(1)}M`;
   if (volume >= 1_000) return `$${(volume / 1_000).toFixed(0)}K`;
   return `$${volume.toFixed(0)}`;
+}
+
+function formatProbabilityDelta(change: number | null | undefined): {
+  label: string;
+  className: string;
+} {
+  if (change == null || !Number.isFinite(change)) {
+    return { label: '-', className: 'text-[#6b7280]' };
+  }
+
+  const isUp = change >= 0;
+  const sign = change > 0 ? '+' : change < 0 ? '-' : '';
+  return {
+    label: `${isUp ? '↑' : '↓'} ${sign}${Math.round(Math.abs(change) * 100)}pp`,
+    className: isUp ? 'text-[#10b981]' : 'text-[#ef4444]',
+  };
 }
 
 function calculateSignificance(signal: SignalRow): number {
@@ -270,74 +321,38 @@ function formatPipelineCompletionMessage(result: PipelineRunResult, elapsedSecon
 async function runPipeline(
   onStep: (status: PipelineStatus, msg: string, counts?: Partial<PipelineRunCounts>) => void
 ): Promise<PipelineRunResult> {
-  let ingested = 0;
-  let analyzed = 0;
-  let newRelevant = 0;
-  let totalRelevant = 0;
+  onStep('ingesting', 'Step 1/3 - Fetching fresh Polymarket data...');
+  onStep('analyzing', 'Step 2/3 - Analyzing new and recently changed markets...');
 
-  onStep('ingesting', 'Step 1/3 — Fetching markets from Polymarket...');
-  const ingestRes = await fetch('/api/ingest', { method: 'POST' });
-  const ingestData = await ingestRes.json();
-  if (!ingestData.success) throw new Error(ingestData.error ?? 'Ingest failed');
-  ingested = Number(ingestData.count ?? 0);
-  const fetchedCount = ingested;
+  const pipelineRes = await fetch('/api/pipeline', { method: 'POST', cache: 'no-store' });
+  const pipelineData = await pipelineRes.json();
+  if (!pipelineData.success) throw new Error(pipelineData.error ?? 'Pipeline failed');
 
-  onStep('analyzing', `Step 2/3 — ${fetchedCount} markets fetched from Polymarket. Analyzing new markets with LLM...`, { ingested });
-  const sensitivity = (typeof window !== 'undefined' ? localStorage.getItem('filter_sensitivity') : null) ?? 'balanced';
-  const analyzeRes = await fetch(`/api/analyze?sensitivity=${sensitivity}`, { method: 'POST' });
-  const analyzeData = await analyzeRes.json();
-  if (!analyzeData.success) throw new Error(analyzeData.error ?? 'Analyze failed');
-  const analyzedCount = Number(analyzeData.analyzed ?? 0);
-  const newRelevantCount = Number(analyzeData.relevant ?? 0);
-  analyzed = analyzedCount;
-  newRelevant = newRelevantCount;
+  const ingested = Number(pipelineData.markets_ingested ?? 0);
+  const analyzed = Number(pipelineData.markets_analyzed ?? 0);
+  const newRelevant = Number(pipelineData.relevant_signals ?? 0);
 
-  if (newRelevantCount > 0) {
-    onStep('reporting', `Step 3/3 — Generating report for ${formatNewRelevantSignalCount(newRelevantCount)}...`, { ingested, analyzed, newRelevant });
-    const reportRes = await fetch('/api/report', { method: 'POST' });
-    const reportData = await reportRes.json();
-    if (!reportData.success && !reportData.id) throw new Error(reportData.error ?? 'Report failed');
-  }
+  onStep('reporting', 'Step 3/3 - Generating fresh morning briefing...', {
+    ingested,
+    analyzed,
+    newRelevant,
+  });
 
   const { count: totalRelevantCount, error: totalRelevantError } = await supabase
     .from('signals')
     .select('*', { count: 'exact', head: true })
     .eq('is_relevant', true);
   if (totalRelevantError) throw new Error(totalRelevantError.message);
-  const totalRelevantSignals = totalRelevantCount ?? 0;
-  totalRelevant = totalRelevantSignals;
-  const analyzedMarketText = formatNewMarketCount(analyzedCount);
 
-  if (newRelevantCount === 0) {
-    onStep('done', `Done — Analyzed ${analyzedMarketText}, no new relevant signals found. Database holds ${totalRelevantSignals} total relevant ${totalRelevantSignals === 1 ? 'signal' : 'signals'}.`, {
-      ingested,
-      analyzed,
-      newRelevant,
-      totalRelevant,
-    });
-    return {
-      ingested,
-      analyzed,
-      newRelevant,
-      totalRelevant,
-      message: `Done — Analyzed ${analyzedMarketText}, no new relevant signals found. Database holds ${totalRelevantSignals} total relevant ${totalRelevantSignals === 1 ? 'signal' : 'signals'}.`,
-    };
-  }
+  const totalRelevant = totalRelevantCount ?? 0;
+  const analyzedMarketText = formatNewMarketCount(analyzed);
+  const message =
+    newRelevant === 0
+      ? `Done - Analyzed ${analyzedMarketText}, no new relevant signals found. Database holds ${totalRelevant} total relevant ${totalRelevant === 1 ? 'signal' : 'signals'}.`
+      : `Done - Analyzed ${analyzedMarketText} this run, ${formatNewRelevantSignalCount(newRelevant)} added. Total: ${formatTotalRelevantSignalCount(totalRelevant)} in database.`;
 
-  if (newRelevantCount > 0) {
-    const message = `Done — Analyzed ${analyzedMarketText} this run, ${formatNewRelevantSignalCount(newRelevantCount)} added. Total: ${formatTotalRelevantSignalCount(totalRelevantSignals)} in database.`;
-    onStep('done', message, { ingested, analyzed, newRelevant, totalRelevant });
-    return {
-      ingested,
-      analyzed,
-      newRelevant,
-      totalRelevant,
-      message,
-    };
-  }
-
-  const message = `Done — Analyzed ${analyzedMarketText}. Total: ${formatTotalRelevantSignalCount(totalRelevantSignals)} in database.`;
   onStep('done', message, { ingested, analyzed, newRelevant, totalRelevant });
+
   return {
     ingested,
     analyzed,
@@ -370,6 +385,7 @@ export default function Dashboard() {
   }, []);
 
   const [topSignals, setTopSignals] = useState<SignalRow[]>([]);
+  const [aheadOfCurveSignals, setAheadOfCurveSignals] = useState<SignalRow[]>([]);
   // Bucket aggregates for the "Thematic Exposure Today" section. Computed
   // from ALL relevant signals, not just the top 5 in the table above.
   const [thematicStats, setThematicStats] = useState<Record<ThematicBucket, BucketStats>>(
@@ -414,7 +430,9 @@ export default function Dashboard() {
     async function fetchData() {
       // Fetch metrics
       const { count: totalScanned } = await supabase.from('markets').select('*', { count: 'exact', head: true });
-      const { count: relevantFound } = await supabase.from('signals').select('*', { count: 'exact', head: true }).eq('is_relevant', true);
+      const relevantCountRes = await fetch(`/api/signals/count?t=${Date.now()}`, { cache: 'no-store' });
+      const relevantCountData = await relevantCountRes.json();
+      if (!relevantCountData.success) throw new Error(relevantCountData.error ?? 'Relevant count failed');
       const { count: highUrgency } = await supabase.from('signals').select('*', { count: 'exact', head: true }).eq('urgency', 'high');
 
       // NOTE: "Markets Moving Today" metric was removed — probability_change /
@@ -425,18 +443,31 @@ export default function Dashboard() {
 
       setMetrics({
         totalScanned: totalScanned || 0,
-        relevantFound: relevantFound || 0,
+        relevantFound: Number(relevantCountData.count ?? 0),
         highUrgency: highUrgency || 0,
         lastUpdatedAt: latestSignal?.[0]?.analyzed_at ?? null,
       });
 
       // Fetch Top Signals — get relevant signals and sort by significance score
-      const { data: top } = await supabase
+      let { data: top, error: topError } = await supabase
         .from('signals')
-        .select('*, markets(id, question, probability, volume, end_date, slug, market_url)')
+        .select('*, markets(id, question, probability, volume, end_date, slug, market_url, last_updated_at, fetched_at)')
         .eq('is_relevant', true)
         .order('analyzed_at', { ascending: false })
         .limit(100); // Fetch more because near-settled/expired markets are filtered client-side.
+
+      if (isMissingFreshnessColumn(topError)) {
+        const fallback = await supabase
+          .from('signals')
+          .select('*, markets(id, question, probability, volume, end_date, slug, market_url, fetched_at)')
+          .eq('is_relevant', true)
+          .order('analyzed_at', { ascending: false })
+          .limit(100);
+        top = fallback.data;
+        topError = fallback.error;
+      }
+
+      if (topError) console.error('[Dashboard] Top signals fetch error:', topError.message);
 
       if (top) {
         const signals = top as unknown as SignalRow[];
@@ -446,6 +477,31 @@ export default function Dashboard() {
           .sort((a, b) => calculateSignificance(b) - calculateSignificance(a))
           .slice(0, 5); // Take top 5 by significance
         setTopSignals(sorted);
+      }
+
+      let { data: aheadRows, error: aheadError } = await supabase
+        .from('signals')
+        .select('*, markets(id, question, probability, probability_24h_ago, volume, end_date, slug, market_url, last_updated_at, fetched_at)')
+        .eq('is_ahead_of_curve', true)
+        .limit(500);
+
+      if (isMissingFreshnessColumn(aheadError)) {
+        const fallback = await supabase
+          .from('signals')
+          .select('*, markets(id, question, probability, probability_24h_ago, volume, end_date, slug, market_url, fetched_at)')
+          .eq('is_ahead_of_curve', true)
+          .limit(500);
+        aheadRows = fallback.data;
+        aheadError = fallback.error;
+      }
+
+      if (aheadError) console.error('[Dashboard] Ahead-of-curve fetch error:', aheadError.message);
+
+      if (aheadRows) {
+        const sorted = [...(aheadRows as unknown as SignalRow[])]
+          .sort((a, b) => getAheadOfCurveMovement(b) - getAheadOfCurveMovement(a))
+          .slice(0, 5);
+        setAheadOfCurveSignals(sorted);
       }
 
       // Fetch ALL relevant signals (just the bucket + direction columns) for
@@ -747,13 +803,14 @@ export default function Dashboard() {
                         <div className="flex items-center gap-2">
                           <span className="font-medium text-white truncate" title={m?.question}>{m?.question}</span>
                           {marketUrl && <MarketLinkIcon url={marketUrl} />}
-                          <AheadOfCurveBadge flagged={s.is_ahead_of_curve} />
+                          <AheadOfCurveBadge flagged={Boolean(s.is_ahead_of_curve)} />
                         </div>
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex flex-col gap-2">
                           <div className="flex items-center gap-2">
                             <span className="font-mono font-semibold text-white">{prob.toFixed(1)}%</span>
+                            <MarketFreshness market={m} />
                             <div className="w-16 h-1.5 bg-[#1f2937] rounded-full overflow-hidden">
                               <div className="h-full bg-[#3b82f6]" style={{ width: `${prob}%` }}></div>
                             </div>
@@ -790,6 +847,98 @@ export default function Dashboard() {
                       </td>
                       <td className="px-6 py-4">
                         <span className="capitalize text-gray-300">{s.signal_type || '—'}</span>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Ahead of Curve Today */}
+      <div className="bg-[#111827] border border-[#1f2937] rounded-xl shadow-sm overflow-hidden">
+        <div className="p-5 border-b border-[#1f2937] flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-lg font-semibold text-white">
+              <SignalTooltip content={<AheadOfCurveTooltipContent />}>
+                <span>⚡</span>
+              </SignalTooltip>{' '}
+              Ahead of Curve Today
+            </h3>
+            <p className="mt-1 text-sm text-[#9ca3af]">Contested · High volume · Just moved sharply</p>
+          </div>
+          <Link
+            href="/signals?ahead_of_curve=true"
+            className="text-sm font-medium text-[#93c5fd] hover:text-[#bfdbfe] whitespace-nowrap"
+          >
+            View all →
+          </Link>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm text-[#9ca3af]">
+            <thead className="bg-[#0a0f1e] text-[#9ca3af] uppercase font-semibold text-xs border-b border-[#1f2937]">
+              <tr>
+                <th className="px-6 py-4">Market Question</th>
+                <th className="px-6 py-4">
+                  <SignalTooltip
+                    content={<Delta24HTooltipContent />}
+                    className="inline-flex items-center gap-1"
+                  >
+                    <span>Δ 24H</span>
+                    <span className="normal-case">(i)</span>
+                  </SignalTooltip>
+                </th>
+                <th className="px-6 py-4">Volume</th>
+                <th className="px-6 py-4">Affected Stocks</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#1f2937]">
+              {aheadOfCurveSignals.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="px-6 py-8 text-center">
+                    No ahead-of-curve signals right now. Check back after the next pipeline run.
+                  </td>
+                </tr>
+              ) : (
+                aheadOfCurveSignals.map((s) => {
+                  const m = getSignalMarket(s);
+                  const delta = formatProbabilityDelta(s.probability_change);
+                  const marketUrl = resolveMarketUrl(m);
+
+                  return (
+                    <tr key={s.id} className="transition-colors duration-150 hover:bg-slate-800/50">
+                      <td className="px-6 py-4 max-w-md">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-white truncate" title={m?.question}>
+                            {m?.question}
+                          </span>
+                          {marketUrl && <MarketLinkIcon url={marketUrl} />}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <span className={`font-mono font-semibold ${delta.className}`}>
+                          {delta.label}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4">
+                        {formatVolume(m?.volume || 0)}
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex flex-wrap gap-1">
+                          {s.affected_stocks?.slice(0, 3).map((stock) => (
+                            <span key={stock} className="px-2 py-0.5 rounded-full bg-[#3b82f6]/20 text-[#3b82f6] text-xs font-medium">
+                              {stock}
+                            </span>
+                          ))}
+                          {(s.affected_stocks?.length ?? 0) > 3 && (
+                            <span className="text-xs text-[#9ca3af]">+{(s.affected_stocks?.length ?? 0) - 3}</span>
+                          )}
+                          {(s.affected_stocks?.length ?? 0) === 0 && (
+                            <span className="text-[#6b7280]">-</span>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );

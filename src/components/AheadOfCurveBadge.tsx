@@ -1,4 +1,7 @@
+'use client';
+
 import React from 'react';
+import { AheadOfCurveTooltipContent, SignalTooltip } from './SignalTooltip';
 
 interface AheadOfCurveBadgeProps {
   /** When false/null, renders nothing (no placeholder). */
@@ -16,11 +19,10 @@ interface AheadOfCurveBadgeProps {
 export function AheadOfCurveBadge({ flagged }: AheadOfCurveBadgeProps) {
   if (!flagged) return null;
   return (
-    <span
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-violet-500/15 text-violet-300 border border-violet-500/30 whitespace-nowrap"
-      title="Probability is in a contested range with sharp recent movement on credible volume — fits the BIT Capital 'act before consensus' thesis."
-    >
-      ⚡ Ahead of Curve
-    </span>
+    <SignalTooltip content={<AheadOfCurveTooltipContent />}>
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-violet-500/15 text-violet-300 border border-violet-500/30 whitespace-nowrap">
+        ⚡ Ahead of Curve
+      </span>
+    </SignalTooltip>
   );
 }
